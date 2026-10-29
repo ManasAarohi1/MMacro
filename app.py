@@ -203,7 +203,8 @@ def display_line(w):
 
 # ================================================================ Discord
 FOOTER = 'Join Manas Biome Support/Hunt Server'
-TESTERS = ('Forsakened One', 'Daniel', 'Slpxy', 'Nova', 'imsomeone', 'Evil Talin Siran', 'ghost', '███\'█_Guest')
+TESTERS = ('Forsakened One', 'Daniel', 'Slpxy', 'Nova', 'imsomeone', 'Evil Talin Siran', 'ghost', '███\'█_Guest',
+           'delta_likes_cats_xd')
 EMBED_GOOD, EMBED_BAD, EMBED_INFO, EMBED_BIOME, EMBED_GOLD = 0x57F287, 0xED4245, 0x8A8F98, 0x58B9FF, 0xFFD700
 BIOME_COLOURS = {'NORMAL': 0xB5BAC1, 'WINDY': 0x9ED9FF, 'RAINY': 0x4A7BD0, 'SNOWY': 0xDCEBFF, 'SAND STORM': 0xE0A85A,
                  'HELL': 0xC0392B, 'STARFALL': 0x6C7BFF, 'CORRUPTION': 0x8E44AD, 'NULL': 0x6B6B6B, 'HEAVEN': 0xFFE89A,
