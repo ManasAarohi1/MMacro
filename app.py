@@ -345,11 +345,10 @@ def post_biome(webhook_url, name, ping=True, server='', previous=None):
                footer=False)
 
 
-def post_merchant(webhook_url, name, ping='', server=''):
-    """`ping` is a Discord user id."""
+def post_merchant(webhook_url, name, server=''):
     post_event(webhook_url, 'Merchant Arrived - %s' % name, 'Found <t:%d:R>' % time.time(),
                MERCHANT_COLOURS.get(name, EMBED_GOLD), 'Merchant', [('Private server', server_field(server), True)],
-               mention(ping), footer=False)
+               footer=False)
 
 
 def post_shot(webhook_url, title, colour, ping='', detail='', area='Macro', fields=()):
@@ -826,7 +825,6 @@ class App:
         self.rejoining = False
         self.watch = None
         self.merchant_detect = False
-        self.ping_id = ''
         self.block_on = False       # copy for the cache thread (Tk vars are UI-thread only)
         self.blocked = {}           # file key: when Roblox last read the real one (ms)
         self.block_path = None
@@ -1017,7 +1015,7 @@ class App:
         tk.Label(box, text='ID', bg=PANEL, fg=TEXT, font=(UIB, 10), anchor='w').pack(fill='x', padx=18, pady=(10, 3))
         self.eden_ping = tk.StringVar(value=self.cfg.get('eden_ping', ''))
         entry(box, self.eden_ping, font=('Consolas', 9)).pack(fill='x', padx=22, ipady=6)
-        hint = tk.Label(box, text='Discord user id pinged for Eden and for merchants (Merchant detection, Macro tab)',
+        hint = tk.Label(box, text='Discord user id pinged for Eden',
                         bg=PANEL, fg=DIM, font=(UI, 8), anchor='w', justify='left')
         hint.pack(fill='x', padx=18, pady=(4, 12))
         hint.bind('<Configure>', lambda e: hint.configure(wraplength=e.width))
@@ -1477,8 +1475,7 @@ class App:
             return
         posted[merchant] = time.time()
         note('merchant', '%s arrived (%s)' % (merchant, how))
-        post_merchant(url or self.url, merchant, self.ping_id,
-                      self.server_link or game.load_settings().get('private_server', ''))
+        post_merchant(url or self.url, merchant, self.server_link or game.load_settings().get('private_server', ''))
         self._set(phase='%s arrived' % merchant, colour=GOOD)
         if self.collect and merchant in self.collect_names:
             self.merchant_due, self.merchant_at = merchant, time.monotonic()
@@ -1750,7 +1747,6 @@ class App:
                          'compatibility setting that runs it as administrator), then press Start again.')
             return
         self.merchant_detect = bool(self.merchant_on.get())
-        self.ping_id = self.eden_ping.get()
         if self.merchant_detect and not merchant_cache.cache_found():
             self.phase('Roblox\'s cache was not found', BAD)
             self.refused(STORE_ROBLOX)
@@ -2284,7 +2280,7 @@ class App:
                 return
             found, bought = got
             items = ', '.join(found[s] for s in sorted(found)) or 'Could not read the items'
-            post_shot(self.url, 'Merchant Items - %s' % name, MERCHANT_COLOURS.get(name, EMBED_GOLD), self.ping_id,
+            post_shot(self.url, 'Merchant Items - %s' % name, MERCHANT_COLOURS.get(name, EMBED_GOLD),
                       area='Merchant', fields=[('Item list', items, False),
                                                ('Bought', '\n'.join(bought) or 'Nothing', False)])
             time.sleep(1.0)                             # screenshot is grabbed in the background
