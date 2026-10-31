@@ -76,7 +76,7 @@ SMALL_BUTTON = dict(bg=SUNK, fg=TEXT, activebackground=SUNK, activeforeground=AC
                     highlightthickness=1, highlightbackground=EDGE)
 
 TITLE = 'MMacro'
-VERSION = '1.0.0'
+VERSION = '1.0.1'
 RELEASE_PAGE = 'https://github.com/ManasAarohi1/MMacro/releases/latest'
 RELEASES = os.environ.get('MMACRO_UPDATE_URL') or 'https://api.github.com/repos/ManasAarohi1/MMacro/releases/latest'
 INVITE = 'https://discord.gg/oppression'
@@ -107,8 +107,16 @@ MERCHANT_REPEAT_S = 600                 # one post per visit (the animation repl
 LOG_MAX = 4 << 20                       # trim logs.txt past this
 
 
+_log_lock = threading.Lock()
+
+
 def note(tag, msg):
     """Append a line to logs.txt; never raises."""
+    with _log_lock:
+        _note(tag, msg)
+
+
+def _note(tag, msg):
     try:
         os.makedirs(game.APP_DIR, exist_ok=True)
         path = os.path.join(game.APP_DIR, 'logs.txt')
@@ -208,10 +216,17 @@ TESTERS = ('Forsakened One', 'Daniel', 'Slpxy', 'Nova', 'imsomeone', 'Evil Talin
 EMBED_GOOD, EMBED_BAD, EMBED_INFO, EMBED_BIOME, EMBED_GOLD = 0x57F287, 0xED4245, 0x8A8F98, 0x58B9FF, 0xFFD700
 BIOME_COLOURS = {'NORMAL': 0xB5BAC1, 'WINDY': 0x9ED9FF, 'RAINY': 0x4A7BD0, 'SNOWY': 0xDCEBFF, 'SAND STORM': 0xE0A85A,
                  'HELL': 0xC0392B, 'STARFALL': 0x6C7BFF, 'CORRUPTION': 0x8E44AD, 'NULL': 0x6B6B6B, 'HEAVEN': 0xFFE89A,
-                 'GLITCHED': 0x3BE37A, 'DREAMSPACE': 0xE86AF0, 'CYBERSPACE': 0x2FD3FF}
+                 'GLITCHED': 0x3BE37A, 'DREAMSPACE': 0xE86AF0, 'CYBERSPACE': 0x2FD3FF,
+                 'GRAVEYARD': 0x5E6B5A, 'PUMPKIN MOON': 0xFF7A1A, 'BLOOD RAIN': 0x8B0A1A}      # events
 PING = {'GLITCHED', 'DREAMSPACE', 'CYBERSPACE'}
 CLIP_COLOURS = ((10 ** 10, 0xFFC94D), (10 ** 9, 0xB38CFF), (10 ** 8, 0x58B9FF), (1, EMBED_GOOD))  # by rarity
 MERCHANT_COLOURS = {'Rin': 0xFF8C00, 'Mari': 0xFFD700, 'Jester': 0x9B59B6}
+
+
+def biome_colour(name):
+    """Event biomes may come as '(Event) Graveyard'."""
+    name = re.sub(r'^\W*EVENT\W*', '', (name or '').upper()).strip()
+    return BIOME_COLOURS.get(name, EMBED_BIOME)
 
 
 def is_rare(name):
@@ -342,7 +357,7 @@ def post_biome(webhook_url, name, ping=True, server='', previous=None):
     if previous:
         fields.append(('Previous', pretty(previous), True))
     post_event(webhook_url, 'Biome Started - %s' % pretty(name), 'Found <t:%d:R>' % time.time(),
-               BIOME_COLOURS.get(name.upper(), EMBED_BIOME), 'Biome', fields, '@everyone' if ping else '',
+               biome_colour(name), 'Biome', fields, '@everyone' if ping else '',
                footer=False)
 
 
@@ -452,7 +467,9 @@ def install(new, exe, pid, zipped):
     bat = os.path.join(tempfile.gettempdir(), 'mmacro_update_%d.bat' % pid)
     with open(bat, 'w', encoding='ascii') as f:
         f.write(SWAP_BAT)       # paths go in as env vars, a .bat can mangle them
-    env = dict(os.environ, MMACRO_NEW=new, MMACRO_EXE=exe, MMACRO_DIR=os.path.dirname(exe), MMACRO_PID=str(pid),
+    # so the new exe unpacks its own files
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith(('_PYI_', '_MEIPASS'))}
+    env.update(PYINSTALLER_RESET_ENVIRONMENT='1', MMACRO_NEW=new, MMACRO_EXE=exe, MMACRO_DIR=os.path.dirname(exe), MMACRO_PID=str(pid),
                MMACRO_ZIP='1' if zipped else '0')
     subprocess.Popen(['cmd', '/c', bat], env=env, creationflags=0x08000000 | 0x00000200, close_fds=True)
 
@@ -899,7 +916,7 @@ class App:
         self._autosave()
         self._hotkeys()
         root.after(100, self._pump)
-        self.updating, self.pending_update = False, None
+        self.updating = self.ran = False
         self.check_update()
 
     # ----------------------------------------------------------------- layout
@@ -1037,7 +1054,15 @@ class App:
                 pass
             text = tk.Frame(row, bg=PANEL)
             text.pack(side='left', fill='x', expand=True)
-            tk.Label(text, text=name, bg=PANEL, fg=TEXT, font=(UIB, 12), anchor='w').pack(fill='x')
+            top = tk.Frame(text, bg=PANEL)
+            top.pack(fill='x')
+            tk.Label(top, text=name, bg=PANEL, fg=TEXT, font=(UIB, 12), anchor='w').pack(side='left')
+            if name == 'Manas':
+                link = tk.Label(top, text=INVITE.split('//')[-1], bg=PANEL, fg=ACCENT, font=(UI, 9), cursor='hand2')
+                link.pack(side='left', padx=(10, 0))
+                link.bind('<Button-1>', lambda e: webbrowser.open(INVITE))
+                link.bind('<Enter>', lambda e: e.widget.configure(font=(UI, 9, 'underline')))
+                link.bind('<Leave>', lambda e: e.widget.configure(font=(UI, 9)))
             for i, line in enumerate(what):
                 label = tk.Label(text, text=line, bg=PANEL, fg=DIM, font=(UI, 9 if i == 0 else 7), anchor='w',
                                  justify='left')
@@ -1056,14 +1081,15 @@ class App:
                                     'and fishes', 'fish_on')
         rule(box)
         self.fish_vip = self._toggle(box, 'VIP', 'untick if you do not own VIP', 'fish_vip')
-        self.fish_vip.set(bool(self.cfg.get('fish_vip', True)))         # the route was recorded with VIP
         rule(box)
         self.fish_sell = self._field(box, 'Sell every', str(self.cfg.get('fish_sell', 0)),
                                      'fish caught, then go back to sell (0 = off)')
         rule(box)
         self.fish_sell_all = self._toggle(box, 'Sell all', 'reads the fish count and sells until it is 0; untick '
                                           'to use Sell amount', 'fish_sell_all')
-        self.fish_sell_all.set(bool(self.cfg.get('fish_sell_all', True)))
+        rule(box)
+        self.fish_full_check = self._toggle(box, 'Full bag check', 'reads the "not enough inventory space" note: sells, '
+                                            'and rejoins if it is still full right after selling', 'fish_full_check')
         rule(box)
         self.fish_sell_amount = tk.StringVar(value=str(self.cfg.get('fish_sell_amount', 10)))
         amount = []
@@ -1245,12 +1271,7 @@ class App:
         bar.pack(fill='x', padx=16, pady=(2, 10))
         strip = tk.Frame(bar, bg=BG)
         strip.pack()
-        tk.Label(strip, text='F1 start   F2 stop        Made by Manas  |  ', bg=BG, fg=DIM, font=(UI, 9)).pack(side='left')
-        link = tk.Label(strip, text=INVITE, bg=BG, fg=ACCENT, font=(UI, 9), cursor='hand2')
-        link.pack(side='left')
-        link.bind('<Button-1>', lambda e: webbrowser.open(INVITE))
-        link.bind('<Enter>', lambda e: link.configure(font=(UI, 9, 'underline')))
-        link.bind('<Leave>', lambda e: link.configure(font=(UI, 9)))
+        tk.Label(strip, text='F1 start   F2 stop        Made by Manas', bg=BG, fg=DIM, font=(UI, 9)).pack(side='left')
 
     # --------------------------------------------------------------- settings
     def _autosave(self):
@@ -1265,7 +1286,7 @@ class App:
         self._autosave_later = later
         for var in (self.auto_items, self.anti_afk, self.merchant_on, self.webhook, self.auto_reconnect, self.server,
                     self.low_end, self.rejoin_browser, self.eden_on, self.eden_path, self.eden_record,
-                    self.eden_ping, self.fish_on, self.fish_vip, self.fish_sell, self.fish_sell_all, self.fish_sell_amount, self.collect_on, self.clip_on, self.clip_from,
+                    self.eden_ping, self.fish_on, self.fish_vip, self.fish_sell, self.fish_sell_all, self.fish_full_check, self.fish_sell_amount, self.collect_on, self.clip_on, self.clip_from,
                     self.clip_key_on, self.clip_keys, self.equip_on, self.equip_name):
             var.trace_add('write', later)
 
@@ -1287,6 +1308,7 @@ class App:
                                 'fish_vip': bool(self.fish_vip.get()),
                                 'fish_sell': self.sell_every(),
                                 'fish_sell_all': bool(self.fish_sell_all.get()),
+                                'fish_full_check': bool(self.fish_full_check.get()),
                                 'fish_sell_amount': self.sell_amount(),
                                 'collect_on': bool(self.collect_on.get()),
                                 'collect_merchants': [n for n, v in self.collect_from.items() if v.get()],
@@ -1639,6 +1661,8 @@ class App:
                         BAD if self.running else DIM)
 
     def _apply(self, kw):
+        if 'toast' in kw:
+            self.notice(kw['toast'], BAD, 12000)
         if 'phase' in kw:
             self.phase(kw['phase'], kw.get('colour', TEXT))
         if 'biome' in kw:
@@ -1664,8 +1688,6 @@ class App:
             if self.start_again:
                 self.start_again = False
                 self.root.after(200, self.start)
-            if self.pending_update is not None:
-                self.root.after(500, lambda f=self.pending_update: self.offer_update(f))
         if 'update' in kw:
             self.offer_update(kw['update'])
 
@@ -1691,12 +1713,8 @@ class App:
 
     def offer_update(self, found):
         tag, url, size = found
-        if self.updating or version_tuple(tag) <= version_tuple(VERSION):
-            return
-        if self.running:            # ask after the run
-            self.pending_update = found
-            return
-        self.pending_update = None
+        if self.updating or self.ran or version_tuple(tag) <= version_tuple(VERSION):
+            return                  # only asked on opening
         folder = os.path.dirname(sys.executable)
         if not can_write(folder):
             if messagebox.askyesno(TITLE, "MMacro %s is out, but this folder can't be written to:\n%s\n\n"
@@ -1729,8 +1747,9 @@ class App:
 
     # ---------------------------------------------------------------- actions
     def start(self):
-        if self.running:
+        if self.running or self.updating:
             return
+        self.ran = True
         self.server_link = self.server.get().strip()
         self.reconnect_on = bool(self.auto_reconnect.get())
         self.daily_mark = time.time()
@@ -1901,6 +1920,7 @@ class App:
         halt = lambda: game.ABORT or self.need_rejoin is not None
         self.fisher = fishing.Fisher(vip=bool(self.fish_vip.get()), sell_every=self.sell_every(),
                                      sell_amount=self.sell_amount(), sell_all=bool(self.fish_sell_all.get()),
+                                     full_check=bool(self.fish_full_check.get()),
                                      say=lambda m: note('fishing', m),
                                      report=self.post_fishing) if self.fish_on.get() else None
         merchant_wait = None                            # merchant came mid-fish
@@ -1970,6 +1990,13 @@ class App:
                     note('fishing', 'failed - %s: %s' % (type(e).__name__, e))
                     self.fisher.lost()
                     self.nap(LOOK_EVERY_S)
+                if self.fisher.rejoin:
+                    self.fisher.rejoin = False
+                    if self.reconnect_on:
+                        game.close_roblox()
+                        self.need_rejoin = 'inventory still full after selling'
+                    else:
+                        note('fishing', 'not rejoining: Auto reconnect is off')
                 self.beat = time.monotonic()
                 continue
             if self.anti_afk.get() and time.monotonic() >= afk_due and not self.need_rejoin:
@@ -2113,7 +2140,11 @@ class App:
     def fit_roblox(self):
         """Resize a windowed Roblox to a known size; never raises."""
         try:
-            game.fit_window(say=lambda m: note('window', m))
+            def say(m):
+                note('window', m)
+                if 'F11' in m:
+                    self._set(toast=m)
+            game.fit_window(say=say)
         except Exception as e:
             note('window', 'sizing the Roblox window failed: %s: %s' % (type(e).__name__, e))
 

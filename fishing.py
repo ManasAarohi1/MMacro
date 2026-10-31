@@ -23,14 +23,17 @@ TO_SHOP_FREE = [(0.0, 'down', 'w'), (0.875, 'down', 'a'), (6.725, 'up', 'w'), (6
 TO_SPOT_FREE = [(0.0, 'down', 'd'), (2.875, 'up', 'd'), (2.875, 'down', 'w'), (5.075, 'up', 'w')]
 ZOOM_OUT_S = 1.5         # hold O before the first cast, zoomed in you lose the bobber
 ZOOM_TOPUP_S = 0.3       # short top-up before later casts
-BITE_WHITE = 235         # bite icon is 250-255 normally, ~245 in tinted biomes
-BITE_POLL_S = 0.02
+BITE_WHITE = 200         # lit is 245-255, ~230 over Remote Desktop; resting is under 40
+BITE_CAP = 244           # so a tinted bite still counts
+BITE_POLL_S = 0.05       # the spot stays lit for the whole catch
+DRY_CASTS = 2            # Fish doing nothing more times than this = full bag
 REEL_S = 9.0             # a reel never lasts longer
 THIN = 20 / 405          # FishSol's 20 px of a 405 px bar
 RUN_TOL = 20             # zone colour drifts ~15 over bright backgrounds, the fill is ~100 off
 NO_BITE_S = 30.0        # then the failsafe takes a step
 REEL_MIN_S = 1.0
-GONE_LOOKS = 3           # catch bar missing this many looks in a row = reel over
+BAR_SHOWS_S = 1.5
+GONE_LOOKS = 3          # catch bar missing this many looks in a row = reel over
 CLOSE_WAIT_S = 0.2
 X_SHOWS_S = 2.5          # the X shows ~1.9 s after the reel
 SEE_CAST_S = 2.0
@@ -135,7 +138,7 @@ def fast_click():
     game.button('left', False)
 
 
-def cast(halt, zoom=ZOOM_OUT_S):
+def cast(halt, zoom=ZOOM_OUT_S, full_check=True):
     if game.take_foreground() is None:
         return False
     game.down('o')
@@ -151,8 +154,30 @@ def cast(halt, zoom=ZOOM_OUT_S):
         st = wait_state(lambda st: st != 'fish', SEE_CAST_S, halt)
         if st != 'fish':
             return not halt()                   # cast, already biting, or unreadable: carry on
+        if go == 1 and full_check and bag_full():
+            return 'full'
         print('fishing: Fish still showing after the click (go %d of %d)' % (go, TRIES))
     return not halt()
+
+
+def bag_full():
+    """The red 'Cannot Fish / not enough inventory space' note, bottom right."""
+    w = game.roblox_window()
+    if w is None:
+        return False
+    x0, y0, cw, ch = game.client_rect(w)
+    img = game.grab((x0 + cw // 2, y0 + ch // 2, x0 + cw, y0 + ch))
+    a = img.astype(int)
+    red = (a[..., 0] >= 200) & (a[..., 0] > a[..., 1] + 90) & (a[..., 0] > a[..., 2] + 90)
+    if red.sum() < 40:
+        return False
+    ys, xs = np.nonzero(red)
+    crop = img[max(0, ys.min() - 10):ys.max() + 10, max(0, xs.min() - 10):xs.max() + 10]
+    try:
+        text = ''.join(merchant.read_lines(crop)).lower().replace(' ', '')
+    except Exception:
+        return False
+    return 'inventory' in text or 'cannotfish' in text
 
 
 def icon_level():
@@ -160,18 +185,31 @@ def icon_level():
     return 0 if icon is None else min(pixel(icon))
 
 
+def cutoff(idle):
+    return min(BITE_CAP, max(BITE_WHITE, idle + 30))
+
+
 def bitten(within, halt, idle=0):
-    """True once the icon flashes white. `idle` is its level before, the bite has to beat it."""
+    """True once the icon lights up after being dark since the cast."""
     icon = fcentre('fishingMinigameIcon')
     if icon is None:
         return False
-    white = min(250, max(BITE_WHITE, idle + 6))
+    global peak, dipped
+    white = cutoff(idle)
     end = time.perf_counter() + within
     while time.perf_counter() < end and not halt():
-        if min(pixel(icon)) >= white:
+        level = min(pixel(icon))
+        peak = max(peak, level)
+        if level < white:
+            dipped = True
+        elif dipped:
             return True
         time.sleep(BITE_POLL_S)
     return False
+
+
+peak = 0            # brightest since the cast, for the log
+dipped = False
 
 
 def _share(rgb, colour):
@@ -212,15 +250,20 @@ def fcentre(name):
 
 
 def fclick(name, settle=0.3):
-    """points.click, but the catch X also gets the bugged window's X clicked, so that one shuts too."""
-    if not points.click(name, 0 if name == 'fishingMinigameResultCloseButton' else settle):
-        return False
-    if name == 'fishingMinigameResultCloseButton':
-        root, w = fbox('fishingMinigamePromptWindowRoot', True), game.roblox_window()
-        if root is not None and w is not None:
-            k = game.client_rect(w)[3] / 1080
-            game.click(round(root[2] - 8 * k), round(root[1] + 9 * k), park=False, settle=0)
+    """Click where the button is now. The catch X also clicks the bugged window's X."""
+    if name != 'fishingMinigameResultCloseButton':
+        c = fcentre(name)
+        if c is None or not game.click(*c, park=False):
+            return False
         game.paced(settle)
+        return True
+    if not points.click(name, 0):
+        return False
+    root, w = fbox('fishingMinigamePromptWindowRoot', True), game.roblox_window()
+    if root is not None and w is not None:
+        k = game.client_rect(w)[3] / 1080
+        game.click(round(root[2] - 8 * k), round(root[1] + 9 * k), park=False, settle=0)
+    game.paced(settle)
     return True
 
 
@@ -246,7 +289,7 @@ def window_state():
     head, x = points.box('fishingMinigameResultHeaderLabel'), points.box('fishingMinigameResultCloseIcon')
     if head and x and _share(game.grab(head), 'white') >= 0.03 and _share(game.grab(x), 'white') >= 0.05:
         return 'catch'
-    for on in (bugged, not bugged):
+    for on in (False, True):                      # normal spot first so one odd read can't stick
         st = _button_state(on)
         if st is not None:
             if on != bugged:
@@ -283,7 +326,13 @@ def reel(halt):
     if bar is None or park is None:
         return 0
     game.glide(*park)
-    time.sleep(0.05)
+    end = time.perf_counter() + BAR_SHOWS_S
+    up = catch_bar_up()
+    while not up and time.perf_counter() < end and not halt():
+        time.sleep(0.02)
+        up = catch_bar_up()
+    if not up and window_state() == 'line':
+        return None                              # no catch bar: a click here hits Exit
     # FishSol's sample spot: over the success zone at the start, above the timer digits
     mid = (bar[0] + (bar[2] - bar[0]) * 196 // 405, bar[1] + (bar[3] - bar[1]) * 5 // 21)
     colour = pixel(mid)
@@ -466,13 +515,14 @@ def sell(halt, times=1, say=print, every=True):
 class Fisher:
     """One fishing session: get to the spot, catch, and step through a failsafe when nothing bites."""
 
-    def __init__(self, vip=True, sell_every=0, sell_amount=10, sell_all=True, say=print, report=None):
+    def __init__(self, vip=True, sell_every=0, sell_amount=10, sell_all=True, full_check=True, say=print, report=None):
         self.shop_route, self.spot_route = (TO_SHOP, TO_SPOT) if vip else (TO_SHOP_FREE, TO_SPOT_FREE)
         self.sell_every = max(0, int(sell_every or 0))
         self.sell_amount = max(1, int(sell_amount or 1))
         self.sell_all = sell_all
-        global slow
-        slow = 0.0
+        self.full_check = full_check
+        global slow, bugged
+        slow, bugged = 0.0, False
         self.say = say
         self.report = report        # failsafe steps go to the webhook
         self.at_spot = False
@@ -486,16 +536,35 @@ class Fisher:
         self.pause = False          # SC/BR: land the fish, then wait uncast
         self.line_out = False
         self.recast = False         # something else used the screen, cast again before waiting
+        self.dry = 0
+        self.after_sell = False     # next cast is the first since selling
+        self.rejoin = False         # for the app: rejoin Roblox
 
     def cast(self, halt, zoom=None):
+        global peak, dipped
         self.recast = False         # a second cast would hit Exit and cancel this one
         if zoom is None:
             zoom = ZOOM_TOPUP_S if self.zoomed else ZOOM_OUT_S
-        ok = cast(halt, zoom) and nap(0.5, halt)
+        done = cast(halt, zoom, self.full_check)
+        if done == 'full':
+            return self.full_bag()
+        self.after_sell = False
+        ok = done and nap(0.5, halt)
         self.zoomed = self.zoomed or bool(ok)
         self.line_out = bool(ok)
-        self.cast_at, self.idle = time.monotonic(), icon_level()
+        self.cast_at, self.idle, peak, dipped = time.monotonic(), icon_level(), 0, False
         return ok
+
+    def full_bag(self):
+        """Sell, or rejoin if it's still full on the first cast after selling."""
+        self.line_out = self.at_spot = False
+        if self.after_sell:
+            self.failsafe('inventory still full right after selling: rejoining')
+            self.rejoin = True
+        else:
+            self.failsafe('inventory full: selling')
+        self.since_sell = 0
+        return True
 
     def failsafe(self, what):
         self.say(what)
@@ -541,9 +610,12 @@ class Fisher:
                 trip, SHOP_TRIPS, ': resetting and walking again' if trip < SHOP_TRIPS else ': fishing without selling'))
             if trip == SHOP_TRIPS:
                 self.since_sell = 0             # so it retries after the next batch, not every fish
-        if not nap(0.2, halt) or not walk(self.spot_route, halt) or not self.cast(halt):
+        if not nap(0.2, halt) or not walk(self.spot_route, halt):
             return False
-        self.at_spot = True
+        self.at_spot = self.after_sell = True
+        if not self.cast(halt):
+            self.at_spot = False
+            return False
         return True
 
     def step(self, halt, wait=8.0):
@@ -558,10 +630,14 @@ class Fisher:
             return self.cast(halt)
         if bitten(wait, halt, self.idle):
             clicks = reel(halt)
+            if clicks is None:
+                self.say('the bite icon lit up (%d, needs %d) but no catch bar came: still waiting' % (
+                    peak, cutoff(self.idle)))
+                return not halt()
             landed = close_catch(halt)
             if halt() or not landed:
                 return False
-            self.stage = 0
+            self.stage = self.dry = 0
             self.lost_run = self.lost_run + 1 if landed == 'lost' else 0
             if landed == 'lost' and self.lost_run >= LOST_RUN:
                 if self.lost_run == LOST_RUN:
@@ -596,6 +672,10 @@ class Fisher:
             if self.pause or self.hold:
                 self.line_out = False
                 return True
+            self.dry += 1
+            if self.dry > DRY_CASTS:
+                self.dry = 0
+                return self.full_bag()
             self.say('the line is not out (Fish showing): casting again')
             return self.cast(halt)
         if time.monotonic() - self.cast_at < NO_BITE_S:
@@ -604,6 +684,8 @@ class Fisher:
             self.say('no bite in %d s with %s waiting: reeling in' % (NO_BITE_S, 'SC/BR' if self.pause else 'a merchant'))
             return self.reel_in(halt)
         self.stage = (self.stage + 1) % 4
+        self.say('bite icon: %d at the cast, %d at its brightest, a bite needs %d'
+                 % (self.idle, peak, cutoff(self.idle)))
         self.failsafe({1: 'no bite in %d s: casting again' % NO_BITE_S, 3: 'no bite in %d s: casting again' % NO_BITE_S,
                        2: 'still no bite: walking back to the spot',
                        0: 'still no bite: a full bag looks like this - selling'}[self.stage])

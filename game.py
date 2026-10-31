@@ -9,7 +9,6 @@ import os
 import random
 import re
 from urllib.parse import parse_qs, urlsplit
-import signal
 import subprocess
 import sys
 import threading
@@ -53,6 +52,7 @@ DEFAULTS = {
     "fish_vip": True,
     "fish_sell": 0,
     "fish_sell_all": True,
+    "fish_full_check": True,
     "fish_sell_amount": 10,
     "clip_on": False,
     "clip_min": "1,000,000,000",
@@ -217,7 +217,7 @@ def newest_log(log_dir=LOG_DIR):
     return names[0] if names else None
 
 
-QUIET_S = 10             # quiet this long = dead (a launch stub whose game moved to the tray client)
+STUB_QUIET_S = 10        # quiet this long = dead (a launch stub whose game moved to the tray client)
 
 
 def moved_on(latest, path):
@@ -227,7 +227,7 @@ def moved_on(latest, path):
         return False
     if path is None or not os.path.exists(path) or _stat(latest, "st_ctime") > _stat(path, "st_ctime"):
         return True
-    return time.time() - _stat(path, "st_mtime") > QUIET_S
+    return time.time() - _stat(path, "st_mtime") > STUB_QUIET_S
 
 
 def follow(stop, log_dir=LOG_DIR, poll=1.0):
@@ -451,7 +451,6 @@ def release_all(focus=True):
 
 
 _armed = False
-_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 
 def arm():
@@ -460,11 +459,6 @@ def arm():
     if _armed:
         return
     atexit.register(release_all)
-    for s in _SIGNALS:
-        try:
-            signal.signal(s, lambda *a: (release_all(), sys.exit(1)))
-        except (ValueError, OSError):
-            pass
     _armed = True
 
 
@@ -475,11 +469,6 @@ def disarm():
         atexit.unregister(release_all)
     except Exception:
         pass
-    for s in _SIGNALS:
-        try:
-            signal.signal(s, signal.SIG_DFL)
-        except (ValueError, OSError):
-            pass
 
 
 def tap(key, hold=None, gap=None):
@@ -990,19 +979,19 @@ def move_path(start, end, jitter=3.0, most=40):
 GLIDE_S = 0.3              # pointer travel time
 
 
-def glide(x, y, settle=MOVE_DELAY_S):
+def glide(x, y, settle=MOVE_DELAY_S, travel=GLIDE_S):
     path = move_path(cursor(), (x, y), most=12)
-    step = GLIDE_S / len(path)
+    step = travel / len(path)
     for i, (px, py) in enumerate(path):
         last = i == len(path) - 1
         move_to(int(round(px)), int(round(py)), settle=settle if last else step * random.uniform(0.8, 1.2))
 
 
-def click(x, y, park=True, settle=MOVE_DELAY_S):
+def click(x, y, park=True, settle=MOVE_DELAY_S, travel=GLIDE_S):
     """Focus Roblox, glide there, click. Nothing is sent if Roblox won't come forward."""
     if take_foreground() is None:
         return False
-    glide(x, y, settle)                                     # the button needs to see the hover
+    glide(x, y, settle, travel)                                   # the button needs to see the hover
     if not button('left', True):
         return False
     time.sleep(0.03 * PACE)
@@ -1165,7 +1154,7 @@ class Watch:
             pass
         return self.state
 
-    def quiet_for(self, now=None):
+    def quiet_for(self):
         return time.monotonic() - self.fresh
 
     def trouble(self, quiet_s=None, check_process=True):
@@ -1743,8 +1732,8 @@ def _fit(hwnd, say):
     s = _client(hwnd)[1]
     stretched = '' if abs(s - 1) < 0.01 else ' (Roblox is not DPI aware: Windows stretches it %d%%)' % round(s * 100)
     if not u32.GetWindowLongW(wintypes.HWND(hwnd), -16) & 0x00C00000:       # no title bar: fullscreen
-        say('Roblox is fullscreen at %dx%d, a size the buttons are not made for: press F11 in Roblox for a window '
-            'and MMacro sizes it%s' % (cw, ch, stretched))
+        say('Roblox is fullscreen (or borderless) at %dx%d, a size the buttons are not made for: press F11 in Roblox '
+            'for a normal window and MMacro sizes it to 1080p%s' % (cw, ch, stretched))
         return False
     if u32.IsZoomed(wintypes.HWND(hwnd)):
         u32.ShowWindowAsync(wintypes.HWND(hwnd), 9)     # SW_RESTORE: a maximised window cannot be sized
@@ -1825,14 +1814,14 @@ def to_screen(point):
     return int(round(left + point[0] * w)), int(round(top + point[1] * h))
 
 
-def press_point(name, settle=0.3):
+def press_point(name, settle=0.3, travel=GLIDE_S):
     """Click a button. False if it has no spot or Roblox won't come forward.
     No window means no click: client_box's fallback size would put it somewhere random."""
     if find_roblox_window() is None:
         print('   no Roblox window to click in -- not clicking %s' % name)
         return False
     at = point_at(name)
-    if at is None or not click(*at, park=False):
+    if at is None or not click(*at, park=False, travel=travel):
         return False
     paced(settle)
     return True
@@ -1849,9 +1838,6 @@ def point_at(name):
     return None
 
 
-CHAT_TOGGLE = (138, 34)  # chat button, px from the client's top left (the top bar never scales)
-
-
 def collection_open():
     """Is Collection up? Looks for the thin bright lines around its list buttons. None if its box is unknown."""
     import points
@@ -1866,19 +1852,23 @@ def collection_open():
 
 
 def align_camera(stop=lambda: False):
-    """Open and close Collection to square the camera. If chat covers Exit, hide chat and retry.
-    False if stopped or it stays open."""
+    """Open and close Collection to square the camera. False if it never opened or shut."""
     if stop() or take_foreground() is None:
         return False
-    if not press_point('collection', settle=1.0) or stop():
-        return not stop()
+    for go in range(1, 4):
+        # slow, a fast glide sometimes only hovers it
+        if press_point('collection', settle=1.0, travel=0.6) and collection_open() is not False:
+            break
+        if stop():
+            return False
+        print('   Collection did not open (go %d of 3): pressing it again' % go)
+        x, y = cursor()
+        glide(x + 60, y + 120)                  # off it so the next try hovers fresh
+    else:
+        return False
     press_point('exit_collection', settle=0.5)
     if collection_open() and not stop():
-        print('   Collection is still open: hiding the chat over its Exit (left hidden) and pressing Exit again')
-        w = find_roblox_window()
-        x0, y0 = client_rect(w)[:2] if w is not None else (0, 0)
-        click(x0 + CHAT_TOGGLE[0], y0 + CHAT_TOGGLE[1], park=False)
-        paced(0.3)
+        print('   Collection is still open: pressing Exit again')
         press_point('exit_collection', settle=0.5)
         if collection_open():
             print('   Collection would not shut')

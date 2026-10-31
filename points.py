@@ -34,6 +34,23 @@ def _nearest(cw, ch):
     return min(_sizes(), key=lambda s: (round(abs(s[0] / s[1] - cw / ch), 2), abs(s[1] - ch)))
 
 
+def _lerp(xs, ys, x):
+    i = 1 if x <= xs[1] else len(xs) - 1
+    return ys[i - 1] + (ys[i] - ys[i - 1]) * (x - xs[i - 1]) / (xs[i] - xs[i - 1])
+
+
+def _bar_box(name, ow, oh):
+    """The fishing bar at an unstored size. It's placed by width, so plain stretching misses the icon."""
+    full = sorted(s for s in _sizes() if abs(s[0] / s[1] - 16 / 9) < 0.01)
+    rows = [(w, h) + tuple(_sizes()[(w, h)][name]) for w, h in full]
+    ws = [r[0] for r in rows]
+    bw = _lerp(ws, [r[4] for r in rows], ow)
+    bh = _lerp(ws, [r[5] for r in rows], ow)
+    cx = ow / 2 + _lerp(ws, [l + a / 2 - w / 2 for w, h, l, t, a, b in rows], ow)
+    cy = oh * _lerp(ws, [(t + b / 2) / h for w, h, l, t, a, b in rows], ow)
+    return cx - bw / 2, cy - bh / 2, bw, bh
+
+
 def box(name):
     """(left, top, right, bottom) on screen, or None with no Roblox window."""
     w = game.roblox_window()                    # costs ~8 ms and fishing calls this a lot
@@ -51,6 +68,9 @@ def box(name):
         s = cw / size[0]
         y = lambda v: y0 + ch / 2 + (v - size[1] / 2) * s
         return round(x0 + l * s), round(y(t)), round(x0 + (l + bw) * s), round(y(t + bh))
+    if name.startswith('fishingMinigame') and 'Result' not in name and own not in _sizes():
+        l, t, bw, bh = _bar_box(name, *own)
+        size = own
     sx, sy = cw / size[0], ch / size[1]
     return (round(x0 + l * sx), round(y0 + t * sy), round(x0 + (l + bw) * sx), round(y0 + (t + bh) * sy))
 
