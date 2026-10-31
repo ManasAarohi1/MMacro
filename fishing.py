@@ -190,7 +190,7 @@ def cutoff(idle):
 
 
 def bitten(within, halt, idle=0):
-    """True once the icon lights up after being dark since the cast."""
+    """True once the icon lights up after being dark since the cast, or the catch bar shows."""
     icon = fcentre('fishingMinigameIcon')
     if icon is None:
         return False
@@ -203,6 +203,8 @@ def bitten(within, halt, idle=0):
         if level < white:
             dipped = True
         elif dipped:
+            return True
+        if catch_bar_up():          # some sizes only flash the icon, dimmer than the cut-off over Remote Desktop
             return True
         time.sleep(BITE_POLL_S)
     return False
@@ -281,14 +283,18 @@ def _button_state(on):
 
 
 def window_state():
-    """'catch', 'fish' (blue Fish, no line), 'line' (red Exit, cast) or None if unsure.
+    """'catch', 'failed' (red Fishing Failed), 'fish' (blue Fish, no line), 'line' (red Exit, cast) or None if unsure.
 
     None never clicks anything. Finding the button where the bugged window puts it flips `bugged`.
     """
     global bugged
     head, x = points.box('fishingMinigameResultHeaderLabel'), points.box('fishingMinigameResultCloseIcon')
-    if head and x and _share(game.grab(head), 'white') >= 0.03 and _share(game.grab(x), 'white') >= 0.05:
-        return 'catch'
+    if head and x and _share(game.grab(x), 'white') >= 0.03:
+        top = game.grab(head)
+        if _share(top, 'white') >= 0.03:
+            return 'catch'
+        if _share(top, 'red') >= 0.05:
+            return 'failed'
     for on in (False, True):                      # normal spot first so one odd read can't stick
         st = _button_state(on)
         if st is not None:
@@ -365,7 +371,7 @@ def reel(halt):
 
 
 def close_catch(halt):
-    """Shut the catch window as soon as its X shows. 'caught', 'lost' (no window came), or False if stopped.
+    """Shut the catch window as soon as its X shows. 'caught', 'lost' (no window came), 'failed' or False if stopped.
 
     Has to be a proper click (Roblox forward, glide onto it); a jump-and-click sometimes didn't take.
     """
@@ -375,7 +381,7 @@ def close_catch(halt):
     while not halt():
         st = window_state()                       # only 'catch' once the X is drawn
         waited = time.perf_counter() - start
-        if st == 'catch' or waited > SEE_CATCH_S * game.PACE:
+        if st in ('catch', 'failed') or waited > SEE_CATCH_S * game.PACE:
             break                                 # slow PCs draw it late
         if st is None and waited > X_SHOWS_S * game.PACE:
             break                                 # can't read it here, assume the X is up
@@ -384,6 +390,8 @@ def close_catch(halt):
         return False
     if st in ('fish', 'line'):
         return 'lost'
+    if st == 'failed':
+        return fclick('fishingMinigameResultCloseButton', 0.1) and not halt() and 'failed'
     for go in range(1, TRIES + 1):
         if not fclick('fishingMinigameResultCloseButton', 0.1):
             return False
@@ -618,6 +626,11 @@ class Fisher:
             return False
         return True
 
+    def foiled(self, halt, how):
+        self.say('Fishing Failed %s: casting again' % how)
+        self.line_out = False
+        return True if self.pause or self.hold else self.cast(halt)
+
     def step(self, halt, wait=8.0):
         """Wait up to `wait` s for a bite and land it. False if stopped."""
         if not self.at_spot:
@@ -638,6 +651,8 @@ class Fisher:
             if halt() or not landed:
                 return False
             self.stage = self.dry = 0
+            if landed == 'failed':
+                return self.foiled(halt, '(%d reel clicks)' % clicks)
             self.lost_run = self.lost_run + 1 if landed == 'lost' else 0
             if landed == 'lost' and self.lost_run >= LOST_RUN:
                 if self.lost_run == LOST_RUN:
@@ -668,7 +683,11 @@ class Fisher:
             return self.cast(halt)
         if halt():
             return False
-        if window_state() == 'fish' and nap(0.3, halt) and window_state() == 'fish':
+        st = window_state()
+        if st == 'failed':
+            fclick('fishingMinigameResultCloseButton', 0.1)
+            return self.foiled(halt, 'before it was reeled')
+        if st == 'fish' and nap(0.3, halt) and window_state() == 'fish':
             if self.pause or self.hold:
                 self.line_out = False
                 return True

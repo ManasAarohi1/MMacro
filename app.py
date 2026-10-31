@@ -76,7 +76,7 @@ SMALL_BUTTON = dict(bg=SUNK, fg=TEXT, activebackground=SUNK, activeforeground=AC
                     highlightthickness=1, highlightbackground=EDGE)
 
 TITLE = 'MMacro'
-VERSION = '1.0.1'
+VERSION = '1.0.3'
 RELEASE_PAGE = 'https://github.com/ManasAarohi1/MMacro/releases/latest'
 RELEASES = os.environ.get('MMACRO_UPDATE_URL') or 'https://api.github.com/repos/ManasAarohi1/MMacro/releases/latest'
 INVITE = 'https://discord.gg/oppression'
@@ -216,11 +216,12 @@ TESTERS = ('Forsakened One', 'Daniel', 'Slpxy', 'Nova', 'imsomeone', 'Evil Talin
 EMBED_GOOD, EMBED_BAD, EMBED_INFO, EMBED_BIOME, EMBED_GOLD = 0x57F287, 0xED4245, 0x8A8F98, 0x58B9FF, 0xFFD700
 BIOME_COLOURS = {'NORMAL': 0xB5BAC1, 'WINDY': 0x9ED9FF, 'RAINY': 0x4A7BD0, 'SNOWY': 0xDCEBFF, 'SAND STORM': 0xE0A85A,
                  'HELL': 0xC0392B, 'STARFALL': 0x6C7BFF, 'CORRUPTION': 0x8E44AD, 'NULL': 0x6B6B6B, 'HEAVEN': 0xFFE89A,
-                 'GLITCHED': 0x3BE37A, 'DREAMSPACE': 0xE86AF0, 'CYBERSPACE': 0x2FD3FF,
+                 'LOST FOREST': 0x2E8B57, 'GLITCHED': 0x3BE37A, 'DREAMSPACE': 0xE86AF0, 'CYBERSPACE': 0x2FD3FF,
+                 'SINGULARITY': 0x4B1E8C, 'THE RADIANT FOREST': 0xFFF1A8,
                  'GRAVEYARD': 0x5E6B5A, 'PUMPKIN MOON': 0xFF7A1A, 'BLOOD RAIN': 0x8B0A1A}      # events
 PING = {'GLITCHED', 'DREAMSPACE', 'CYBERSPACE'}
 CLIP_COLOURS = ((10 ** 10, 0xFFC94D), (10 ** 9, 0xB38CFF), (10 ** 8, 0x58B9FF), (1, EMBED_GOOD))  # by rarity
-MERCHANT_COLOURS = {'Rin': 0xFF8C00, 'Mari': 0xFFD700, 'Jester': 0x9B59B6}
+MERCHANT_COLOURS = {'Rin': 0xFF8C00, 'Mari': 0xFFD700, 'Jester': 0x9B59B6, 'Boss': 0x6A0DAD}
 
 
 def biome_colour(name):
@@ -362,7 +363,8 @@ def post_biome(webhook_url, name, ping=True, server='', previous=None):
 
 
 def post_merchant(webhook_url, name, server=''):
-    post_event(webhook_url, 'Merchant Arrived - %s' % name, 'Found <t:%d:R>' % time.time(),
+    title = 'Sinister S. has spawned' if name == 'Boss' else 'Merchant Arrived - %s' % name
+    post_event(webhook_url, title, 'Found <t:%d:R>' % time.time(),
                MERCHANT_COLOURS.get(name, EMBED_GOLD), 'Merchant', [('Private server', server_field(server), True)],
                footer=False)
 
@@ -918,6 +920,13 @@ class App:
         root.after(100, self._pump)
         self.updating = self.ran = False
         self.check_update()
+        threading.Thread(target=self._fetch_auras, daemon=True).start()
+
+    def _fetch_auras(self):
+        try:
+            note('clip', 'aura list from GitHub: %d auras' % clipper.refresh())
+        except Exception as e:
+            note('clip', 'aura list not fetched, using the saved one: %s: %s' % (type(e).__name__, e))
 
     # ----------------------------------------------------------------- layout
     def _scroller(self, root):
@@ -961,8 +970,8 @@ class App:
         self.anti_afk = self._toggle(box, 'Anti-AFK', 'jump twice every 5 minutes so Roblox does not kick for idling',
                                      'anti_afk')
         rule(box)
-        self.merchant_on = self._toggle(box, 'Merchant detection', 'Detects Mari, Jester and Rin through Roblox\'s '
-                                        'cache', 'merchant_on')
+        self.merchant_on = self._toggle(box, 'Merchant detection', 'Detects Mari, Jester, Rin and the boss through '
+                                        'Roblox\'s cache', 'merchant_on')
         self.block_on = bool(self.merchant_on.get())
         self.merchant_on.trace_add('write', self._merchant_toggled)
         rule(box)

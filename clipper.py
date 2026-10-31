@@ -7,6 +7,7 @@ import re
 import sys
 import threading
 import time
+import urllib.request
 
 import cv2
 import numpy as np
@@ -33,14 +34,56 @@ def biome_key(name):
 
 
 _names = None
+AURAS_URL = 'https://raw.githubusercontent.com/ManasAarohi1/MMacro/main/auras.json'
+LIVE = os.path.join(game.APP_DIR, 'auras.json')     # the last list fetched from GitHub
+
+
+def _read(body):
+    """{name: [1 in N, {biome: 1 in M}]}, bad entries dropped."""
+    try:
+        d = json.loads(body)
+    except ValueError:
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    return {k: v for k, v in d.items() if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int)
+            and isinstance(v[1], dict)}
+
+
+def _load():
+    """The list built into the exe, with the fetched one on top (it can add and change, never remove)."""
+    here = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    auras = {}
+    for path in (os.path.join(here, 'auras.json'), LIVE):
+        try:
+            with open(path, encoding='utf-8') as f:
+                auras.update(_read(f.read()))
+        except OSError:
+            pass
+    return auras
+
+
+def refresh(timeout=10):
+    """Fetches the aura list from GitHub so new auras count without a new build. Returns how many are known."""
+    global _names, _table
+    req = urllib.request.Request(AURAS_URL, headers={'User-Agent': 'MMacro'})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        body = r.read()
+    if not _read(body.decode('utf-8')):
+        raise ValueError('not an aura list')
+    os.makedirs(game.APP_DIR, exist_ok=True)
+    with open(LIVE + '.tmp', 'wb') as f:
+        f.write(body)
+    os.replace(LIVE + '.tmp', LIVE)
+    _names = _load()
+    _table = None
+    return len(_names)
 
 
 def names():
     global _names
     if _names is None:
-        here = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(here, 'auras.json'), encoding='utf-8') as f:
-            _names = json.load(f)
+        _names = _load()
     return list(_names)
 
 
