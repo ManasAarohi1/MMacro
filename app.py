@@ -76,7 +76,7 @@ SMALL_BUTTON = dict(bg=SUNK, fg=TEXT, activebackground=SUNK, activeforeground=AC
                     highlightthickness=1, highlightbackground=EDGE)
 
 TITLE = 'MMacro'
-VERSION = '1.0.3'
+VERSION = '1.0.4'
 RELEASE_PAGE = 'https://github.com/ManasAarohi1/MMacro/releases/latest'
 RELEASES = os.environ.get('MMACRO_UPDATE_URL') or 'https://api.github.com/repos/ManasAarohi1/MMacro/releases/latest'
 INVITE = 'https://discord.gg/oppression'
@@ -985,6 +985,11 @@ class App:
         tk.Label(line, text='from 1 in', bg=PANEL, fg=DIM, font=(UI, 8)).pack(side='left')
         self.clip_from = tk.StringVar(value=str(self.cfg.get('clip_min', '1,000,000,000')))
         entry(line, self.clip_from, width=14, justify='center', font=('Consolas', 9)).pack(side='left', padx=(6, 0), ipady=1)
+        tk.Label(line, text='quality', bg=PANEL, fg=DIM, font=(UI, 8)).pack(side='left', padx=(12, 0))
+        q = self.cfg.get('clip_quality')
+        self.clip_quality = tk.StringVar(value=q if q in clipper.HEIGHTS else '768p')
+        tk.Button(line, textvariable=self.clip_quality, padx=8, **dict(SMALL_BUTTON, font=('Consolas', 9), pady=1),
+                  command=self._next_quality).pack(side='left', padx=(6, 0))
         keys = tk.Frame(text, bg=PANEL)
         keys.pack(fill='x', pady=(4, 0))
         self.clip_key_on = tk.BooleanVar(value=bool(self.cfg.get('clip_key_on')))
@@ -1296,7 +1301,7 @@ class App:
         for var in (self.auto_items, self.anti_afk, self.merchant_on, self.webhook, self.auto_reconnect, self.server,
                     self.low_end, self.rejoin_browser, self.eden_on, self.eden_path, self.eden_record,
                     self.eden_ping, self.fish_on, self.fish_vip, self.fish_sell, self.fish_sell_all, self.fish_full_check, self.fish_sell_amount, self.collect_on, self.clip_on, self.clip_from,
-                    self.clip_key_on, self.clip_keys, self.equip_on, self.equip_name):
+                    self.clip_quality, self.clip_key_on, self.clip_keys, self.equip_on, self.equip_name):
             var.trace_add('write', later)
 
     def remember(self):
@@ -1323,6 +1328,7 @@ class App:
                                 'collect_merchants': [n for n, v in self.collect_from.items() if v.get()],
                                 'clip_on': bool(self.clip_on.get()),
                                 'clip_min': self.clip_from.get().strip(),
+                                'clip_quality': self.clip_quality.get(),
                                 'clip_key_on': bool(self.clip_key_on.get()),
                                 'clip_keys': self.clip_keys.get(),
                                 'equip_on': bool(self.equip_on.get()),
@@ -1332,6 +1338,17 @@ class App:
                                 'buy_list': ''})
         except Exception:
             pass
+
+    def _next_quality(self):
+        names = list(clipper.HEIGHTS)
+        q = names[(names.index(self.clip_quality.get()) + 1) % len(names)]
+        if clipper.HEIGHTS[q] > 1080 and not messagebox.askokcancel(
+                'Clip quality', 'Clips above 1080p can use a lot more of your PC: up to 2 GB of memory at 4K and more '
+                'CPU, which can slow Roblox and the macro down on weaker PCs.\n\nThey are never bigger than your Roblox '
+                'window, so this only helps on a 1440p or 4K screen.\n\nUse %s?' % q, icon='warning',
+                parent=self.root):
+            q = names[0]
+        self.clip_quality.set(q)
 
     def _open_clips(self):
         os.makedirs(clipper.CLIP_DIR, exist_ok=True)
@@ -1800,7 +1817,8 @@ class App:
             except ValueError as e:
                 note('clip', 'the clip key cannot be pressed (%s): no clips this run' % e)
         elif self.clip_on.get():
-            self.clipper = clipper.Clipper(lambda text: note('clip', text))
+            self.clipper = clipper.Clipper(lambda text: note('clip', text),
+                                           height=clipper.HEIGHTS.get(self.clip_quality.get(), clipper.HEIGHT))
         if self.clipper:
             self.clipper.start()
         self.equip_aura = self._correct_aura() if self.equip_on.get() else None

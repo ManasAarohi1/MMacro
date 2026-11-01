@@ -17,7 +17,8 @@ import game
 FPS = 20
 BEFORE_S = 90            # the log only shows the aura after its cutscene
 AFTER_S = 30
-WIDTH = 960              # max frame width, two minutes of frames sit in memory
+HEIGHTS = {'768p': 768, '1080p': 1080, '1440p': 1440, '4K': 2160}     # two minutes of frames sit in memory
+HEIGHT = 768
 QUALITY = 75
 SHOT_S = 5               # embed picture is from this long before the log line
 CLIP_DIR = os.path.join(game.APP_DIR, 'clips')
@@ -215,24 +216,25 @@ def press_keys(text):
                 time.sleep(0.02)
 
 
-def bgr(rgb):
-    """game.grab's RGB -> BGR, at most WIDTH wide. Uses the BGRA buffer under it, opencv is far faster on that."""
+def bgr(rgb, height=HEIGHT):
+    """game.grab's RGB -> BGR, at most `height` tall (never scaled up). Uses the BGRA buffer under it, opencv is
+    far faster on that."""
     b = rgb.base
     if isinstance(b, np.ndarray) and b.shape == rgb.shape[:2] + (4,) and rgb.ctypes.data - b.ctypes.data == 2:
         img, code = b, cv2.COLOR_BGRA2BGR
     else:
         img, code = np.ascontiguousarray(rgb), cv2.COLOR_RGB2BGR
     h, w = img.shape[:2]
-    if w > WIDTH:
-        img = cv2.resize(img, (WIDTH, round(h * WIDTH / w)), interpolation=cv2.INTER_AREA)
+    if h > height:
+        img = cv2.resize(img, (round(w * height / h) // 2 * 2, height), interpolation=cv2.INTER_AREA)
     return cv2.cvtColor(img, code)
 
 
 class Clipper:
     """Keeps the last BEFORE_S + AFTER_S seconds of the Roblox window."""
 
-    def __init__(self, say=print, fps=FPS, keep_s=BEFORE_S + AFTER_S):
-        self.say, self.fps, self.keep_s = say, fps, keep_s
+    def __init__(self, say=print, fps=FPS, keep_s=BEFORE_S + AFTER_S, height=HEIGHT):
+        self.say, self.fps, self.keep_s, self.height = say, fps, keep_s, height
         self.frames = collections.deque(maxlen=fps * keep_s)
         self.stop_event = threading.Event()
         self.thread = None
@@ -253,7 +255,7 @@ class Clipper:
             t0 = time.perf_counter()
             try:
                 if game.roblox_window() is not None:
-                    ok, jpg = cv2.imencode('.jpg', bgr(game.grab(game.client_box((0.0, 0.0, 1.0, 1.0)))),
+                    ok, jpg = cv2.imencode('.jpg', bgr(game.grab(game.client_box((0.0, 0.0, 1.0, 1.0))), self.height),
                                            [cv2.IMWRITE_JPEG_QUALITY, QUALITY])
                     if ok:
                         now = time.time()

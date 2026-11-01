@@ -56,6 +56,7 @@ DEFAULTS = {
     "fish_sell_amount": 10,
     "clip_on": False,
     "clip_min": "1,000,000,000",
+    "clip_quality": "768p",
 }
 
 

@@ -157,6 +157,8 @@ def cast(halt, zoom=ZOOM_OUT_S, full_check=True):
         if go == 1 and full_check and bag_full():
             return 'full'
         print('fishing: Fish still showing after the click (go %d of %d)' % (go, TRIES))
+        if bugged:                  # a fish that got away leaves the centred window up and Fish dead; its X fixes it
+            fclick('fishingMinigameResultCloseButton')
     return not halt()
 
 
@@ -221,6 +223,9 @@ def _share(rgb, colour):
         hit = (b >= 140) & (b > r + 30) & (b > g + 30)
     elif colour == 'red':
         hit = (r >= 140) & (r > g + 50) & (r > b + 20)
+    elif colour == 'text':          # white or any bright colour
+        hi, lo = a.max(axis=2), a.min(axis=2)
+        hit = (lo >= 225) | ((hi >= 180) & (hi - lo >= 90))
     else:
         hit = a.min(axis=2) >= 225
     return float(hit.mean())
@@ -291,10 +296,10 @@ def window_state():
     head, x = points.box('fishingMinigameResultHeaderLabel'), points.box('fishingMinigameResultCloseIcon')
     if head and x and _share(game.grab(x), 'white') >= 0.03:
         top = game.grab(head)
-        if _share(top, 'white') >= 0.03:
-            return 'catch'
         if _share(top, 'red') >= 0.05:
             return 'failed'
+        if _share(top, 'text') >= 0.03:         # title colour changes with the fish's mutation
+            return 'catch'
     for on in (False, True):                      # normal spot first so one odd read can't stick
         st = _button_state(on)
         if st is not None:
