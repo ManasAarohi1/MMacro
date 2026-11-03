@@ -76,12 +76,13 @@ SMALL_BUTTON = dict(bg=SUNK, fg=TEXT, activebackground=SUNK, activeforeground=AC
                     highlightthickness=1, highlightbackground=EDGE)
 
 TITLE = 'MMacro'
-VERSION = '1.0.4'
+VERSION = '1.0.5'
 RELEASE_PAGE = 'https://github.com/ManasAarohi1/MMacro/releases/latest'
 RELEASES = os.environ.get('MMACRO_UPDATE_URL') or 'https://api.github.com/repos/ManasAarohi1/MMacro/releases/latest'
 INVITE = 'https://discord.gg/oppression'
 ITEM_EVERY_S = {game.SC: 20 * 60, game.BR: 35 * 60}    # SC lasts 20 min, BR 35
 ITEM_RETRY_S = 5 * 60                   # retry a failed one after this
+ITEM_SPARE_S = 15                       # past the cooldown, so a use never lands just before it ends
 REJOIN_WAITS = (15, 30, 60)             # last one repeats
 IN_GAME_S = 150                         # after a rejoin, time to really be in game
 OUT_S = 180                             # Roblox up but not in game this long = disconnect
@@ -841,7 +842,7 @@ class App:
         self.item_due = {}
         self._toast = None
         self._key_stop = False          # F2 stopped it: say 'stopped' once done
-        self.daily_mark = time.time()   # last daily rewards try
+        self.played = False             # Play pressed in a run: claim daily rewards once back in
         self.rejoining = False
         self.watch = None
         self.merchant_detect = False
@@ -1306,6 +1307,7 @@ class App:
 
     def remember(self):
         try:
+            self.wanted = self.wanted_items()               # list edits apply mid-run too
             game.save_settings({'auto_items': bool(self.auto_items.get()),
                                 'anti_afk': bool(self.anti_afk.get()),
                                 'merchant_on': bool(self.merchant_on.get()),
@@ -1778,7 +1780,7 @@ class App:
         self.ran = True
         self.server_link = self.server.get().strip()
         self.reconnect_on = bool(self.auto_reconnect.get())
-        self.daily_mark = time.time()
+        self.played = False
         self.item_due = {}                      # both due now
         self.browser_rejoin = bool(self.rejoin_browser.get())
         self.slow_pc = bool(self.low_end.get())
@@ -2288,21 +2290,24 @@ class App:
         out = game.roblox_running() and not logged_in and (menu or game.find_play() is not None)
         if not out:
             self.out_since = None
+            if self.played and logged_in:
+                self.played = False
+                self.claim_daily()
             return
         self.out_since = self.out_since or mono
         if mono - self._played > PLAY_EVERY_S:
             self.press_play()
             self._played = mono
+            self.played = True
         if mono - self.out_since > OUT_S:
             note('connection', 'not in a game for %d minutes' % (OUT_S // 60))
             self.out_since = None
             self.need_rejoin = 'not in a game for %d minutes' % (OUT_S // 60)
 
     def claim_daily(self):
-        """Claim daily rewards if 23:00 GMT passed since the last try. Never raises."""
-        if game.daily_reset(time.time()) <= self.daily_mark or game.ABORT:
+        """Claim daily rewards, after every Play back into the game. Never raises."""
+        if game.ABORT:
             return
-        self.daily_mark = time.time()
         if not game.daily_clicks_ready():
             note('daily', 'daily rewards skipped: Claim and Close are not calibrated')
             return
@@ -2446,8 +2451,9 @@ class App:
             return False
         try:
             got = game.item_pass(say=say, terms=due)
+            done = time.monotonic()                     # the cooldown starts at Use, not when the pass began
             for t in due:
-                self.item_due[t] = now + (ITEM_EVERY_S[t] if t in got else ITEM_RETRY_S)
+                self.item_due[t] = done + (ITEM_EVERY_S[t] + ITEM_SPARE_S if t in got else ITEM_RETRY_S)
         except Exception as e:
             for t in due:
                 self.item_due[t] = now + ITEM_RETRY_S

@@ -1578,13 +1578,10 @@ SC, BR = 'strange controller', 'biome randomizer'
 CLEAR_TAPS = 40          # clears the old search (aura names run to 31 chars)
 
 
-GREY_MIN = 150           # item names are light grey
-GREYS = np.array([(0x9a, 0x9b, 0x9b), (0xbd, 0xbd, 0xbd), (0x8c, 0x8c, 0x8c), (0xba, 0xba, 0xba)], np.int16)
-GREY_TOL = 10
-INK = 0.004
-TINT_SAT = 90            # a coloured name is a different item
-TINT = 0.004
-GREY_RADIUS = 45         # px around a slot to check, at 1440 px tall
+NAME_COLOURS = {SC: 'grey', BR: 'grey', 'merchant teleporter': 'gold', 'portable crack': 'gold'}
+GOLD = (30, 60)          # hue in degrees (Teleporter and Crack read 44-46)
+NAME_INK = 0.02          # share of the read area a name covers
+NAME_W, NAME_H = 0.36, 0.2   # half the read area, as a share of the slot pitch
 
 
 def stopped():
@@ -1614,8 +1611,8 @@ def type_char(ch, hold=0.03):
             _send(0x10, KEYUP, 0x2A)
 
 
-def type_term(term):
-    for key in (Key.backspace, Key.delete):         # caret may be mid-text, clear both sides
+def type_term(term, clear=True):
+    for key in (Key.backspace, Key.delete) if clear else ():     # caret may be mid-text, clear both sides
         for _ in range(CLEAR_TAPS):
             tap(key, hold=0.01, gap=0.01)
     for ch in term:
@@ -1643,14 +1640,7 @@ MERCHANT_POINTS = (
     ('merchantShopCloseButton', 'Merchant shop: close (X)'),
 )
 BUILT_IN.update({name: name for name, _ in FISH_POINTS + MERCHANT_POINTS})
-DAILY_RESET_H = 23       # GMT hour daily rewards reset
 DAILY_WAIT_S = 2.0       # for their window to show after rejoining
-
-
-def daily_reset(t):
-    """Last 23:00 GMT at or before t (epoch is GMT, so the PC's time zone doesn't matter)."""
-    shift = DAILY_RESET_H * 3600
-    return (t - shift) // 86400 * 86400 + shift
 
 
 def daily_clicks_ready():
@@ -1878,33 +1868,49 @@ def align_camera(stop=lambda: False):
 
 
 def click_use(term, say):
-    """Inventory, Items, search, then use the item if a slot shows it."""
+    """Inventory, Items, search, then use the result whose name has the item's colour."""
     if not open_by_click('inventory', stopped):
         return False
     if stopped() or not press_point('items', settle=0.3):
         return False
-    if stopped() or not press_point('search', settle=0.2):
+    slot = search_item(term, say, stopped, paced)
+    if slot is None:
         return False
-    type_term(term)
-    paced(0.6)
-    for name in ('slot1', 'slot2'):
-        if stopped() or not press_point(name, settle=0.25):
-            return False
-        left, top, _, _ = _window_rect()
-        x, y = point_at(name)
-        what = kind_at((x - left, y - top))
-        if what == 'wanted':
-            paced(0.3)
-            what = kind_at((x - left, y - top))
-        if what == 'wanted':
-            if stopped() or not press_point('use', settle=0.4):
-                return False
-            say('used one %s (%s)' % (term, name))
-            return True
-        say('  %s is %s' % (name, {'other': 'a different item', 'empty': 'empty'}.get(what, what)))
-        if what == 'empty':
-            return False
-    return False
+    name = 'slot%d' % (slot + 1)
+    if stopped() or not press_point(name, settle=0.25) or not press_point('use', settle=0.4):
+        return False
+    say('used one %s (%s)' % (term, name))
+    return True
+
+
+def search_item(term, say, halt, wait):
+    """Type `term` in the open Inventory's search and return the slot to use, or None.
+    Clearing the search must bring the whole bag back first, so the keys are known to reach the box.
+    A wrong-looking result gets the search typed once more; the answer has to read the same twice."""
+    for go in range(2):
+        if halt() or not press_point('search', settle=0.2):
+            return None
+        type_term('')
+        wait(0.4)
+        slot, colours = find_item(term)
+        if colours and colours[2] == 'empty':
+            if halt():
+                return None
+            say('  %s: clearing the search did not bring the bag back (%s)%s' % (
+                term, ', '.join(colours), ': trying again' if go == 0 else ': not using any'))
+            continue
+        type_term(term, clear=False)
+        wait(0.6)
+        slot, colours = find_item(term)
+        if slot is not None:
+            wait(0.3)
+            if find_item(term)[0] == slot:      # the grid can still be redrawing
+                return slot
+        if halt():
+            return None
+        say('  %s: results read as %s%s' % (term, ', '.join(colours) or 'nothing (no slot spots)',
+                                             ': searching again' if go == 0 else ': not using any'))
+    return None
 
 
 OPEN_TRIES = 3           # clicks before giving up on a window
@@ -1962,26 +1968,47 @@ def _grab_window():
     return grab(client_box((0.0, 0.0, 1.0, 1.0)))
 
 
-def kind_at(centre, rgb=None, r=None):
-    """'wanted' (grey name), 'other' (coloured name) or 'empty' near this point."""
-    if rgb is None:
-        rgb = _grab_window()
-    r = r or max(3.0, GREY_RADIUS * rgb.shape[0] / 1440.0)
+def name_colour(centre, rgb, pitch):
+    """Colour of the item name in a slot: 'grey', 'white', 'gold', 'hue N' or 'empty'.
+    Reads the middle of the slot only (slots are `pitch` apart), clear of the selected slot's blue glow and 'x1'."""
     x, y = int(centre[0]), int(centre[1])
-    y0, y1 = max(0, int(y - r)), min(rgb.shape[0], int(y + r) + 1)
-    x0, x1 = max(0, int(x - r)), min(rgb.shape[1], int(x + r) + 1)
-    if y1 <= y0 or x1 <= x0:
+    hx, hy = max(2, int(pitch * NAME_W)), max(2, int(pitch * NAME_H))
+    crop = rgb[max(0, y - hy):y + hy + 1, max(0, x - hx):x + hx + 1].astype(np.int16)
+    if crop.size == 0:
         return 'empty'
-    yy, xx = np.ogrid[y0:y1, x0:x1]
-    disc = (xx - x) ** 2 + (yy - y) ** 2 <= r * r
-    crop = rgb[y0:y1, x0:x1].astype(np.int16)
-    _, sat, val = hsv(crop)
-    bright = (val > GREY_MIN) & disc
-    grey = (disc & (np.abs(crop[..., None, :] - GREYS) <= GREY_TOL).all(-1).any(-1)).sum()
-    tinted = (bright & (sat >= TINT_SAT)).sum()
-    if grey >= INK * disc.sum() and grey >= tinted:
-        return 'wanted'
-    return 'other' if tinted >= TINT * disc.sum() else 'empty'
+    val = crop.max(-1)
+    spread = val - crop.min(-1)
+    flat = spread <= 20
+    tint = (spread >= 60) & (val >= 110)
+    counts = {'grey': (flat & (val >= 120) & (val <= 215)).sum(), 'white': (flat & (val > 215)).sum(),
+              'tint': tint.sum()}
+    best = max(counts, key=counts.get)
+    if counts[best] < NAME_INK * val.size:
+        return 'empty'
+    if best != 'tint':
+        return best
+    hue = int(np.median(hsv(crop)[0][tint])) * 2
+    return 'gold' if GOLD[0] <= hue <= GOLD[1] else 'hue %d' % hue
+
+
+def find_item(term):
+    """Which search result is `term` (0 or 1, else None), and what the first three slots read as.
+    A third result means the search didn't take and the list is the whole bag."""
+    a, b = point_at('slot1'), point_at('slot2')
+    if a is None or b is None:
+        return None, []
+    left, top, _, _ = _window_rect()
+    rgb = _grab_window()
+    pitch = math.hypot(b[0] - a[0], b[1] - a[1])
+    colours = [name_colour((x - left, y - top), rgb, pitch) for x, y in (a, b, (2 * b[0] - a[0], 2 * b[1] - a[1]))]
+    if colours[0] == 'empty' or colours[2] != 'empty':
+        return None, colours
+    want = NAME_COLOURS.get(term)
+    if want is None:                            # colour unknown: only a lone result is safe
+        return (0 if colours[1] == 'empty' else None), colours
+    if any(c not in (want, 'gold', 'empty') for c in colours):
+        return None, colours                    # something else is listed: old results, not this search
+    return next((i for i in (0, 1) if colours[i] == want), None), colours
 
 
 # ================================================================ self check (python game.py)

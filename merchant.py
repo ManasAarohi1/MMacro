@@ -76,7 +76,9 @@ def _identify(text, names):
         c = clean(name)
         if c and c.replace(' ', '') in text.replace(' ', ''):        # OCR is sloppy with spaces
             return name
-        r = difflib.SequenceMatcher(None, c.replace(' ', ''), text.replace(' ', '')).ratio()
+        c, t = c.replace(' ', ''), text.replace(' ', '')
+        # the panel title runs on into a misread rarity ('HeovenlyPotion ILegendory'), so the start counts too
+        r = max(difflib.SequenceMatcher(None, c, t).ratio(), difflib.SequenceMatcher(None, c, t[:len(c)]).ratio())
         if r > score:
             best, score = name, r
     return best if score >= 0.8 else None
@@ -123,48 +125,27 @@ def nap(seconds, halt):
     return not halt()
 
 
-def client_origin():
-    w = game.find_roblox_window()
-    return game.client_rect(w)[:2] if w is not None else (0, 0)
-
-
 def shut_inventory():
     if not game.close_inventory() and not game.sees_windows():
         points.click('inventoryInvClose', 0.2)              # not recognised at this size, click its X anyway
 
 
-def slot_kind(name):
-    at = points.centre(name)
-    if at is None:
-        return 'empty'
-    x0, y0 = client_origin()
-    return game.kind_at((at[0] - x0, at[1] - y0))
-
-
 def use_item(term, halt, say):
-    """Search the Inventory for `term` and Use it. Bails if slot 2 isn't empty: the search didn't take and slot 1
-    could be any potion."""
+    """Search the Inventory for `term` and Use it, only if a result has the item's name colour."""
     what = term.title()
     if game.take_foreground() is None:
         return False
     if not game.open_by_click('inventory', halt):              # retries a swallowed click
         say('the Inventory did not open')
         return False
-    for name, settle in (('inventoryItemsTab', 0.25), ('inventorySearchContent', 0.15)):
-        if halt() or not points.click(name, settle):
-            return False
-    game.type_term(term)
-    if not nap(0.5, halt):
+    if halt() or not points.click('inventoryItemsTab', 0.25):
         return False
-    if slot_kind('inventoryInvItem[1,1]') == 'empty':
-        say('no %s in the inventory' % what)
+    slot = game.search_item(term, say, halt, lambda s: nap(s, halt))
+    if slot is None:
+        say('no %s used' % what)
         shut_inventory()
         return False
-    if slot_kind('inventoryInvItem[1,2]') != 'empty':
-        say('the search did not narrow to the %s: not using slot 1' % what)
-        shut_inventory()
-        return False
-    if halt() or not points.click('inventoryInvItem[1,1]', 0.2) or not points.click('inventoryUseButton', 0.3):
+    if halt() or not game.press_point('slot%d' % (slot + 1), 0.2) or not game.press_point('use', 0.3):
         shut_inventory()
         return False
     shut_inventory()
@@ -282,6 +263,8 @@ def collect(merchant, wanted, halt, say=print):
     names = KNOWN_ITEMS + [n for n in wanted if n not in KNOWN_ITEMS]
     found = read_shop(names, halt)
     say('%s sells: %s' % (merchant, ', '.join('[%d] %s' % kv for kv in sorted(found.items())) or 'nothing read'))
+    if not any(item in wanted for item in found.values()):
+        say('none of the buy list is here (list: %s)' % (', '.join(wanted) or 'empty'))
     bought = []
     for slot, item in sorted(found.items()):
         if item in wanted and buy(slot, item, wanted[item], names, halt, say):
