@@ -3,6 +3,7 @@ import difflib
 import re
 import time
 
+import cv2
 import numpy as np
 
 import game
@@ -21,7 +22,9 @@ KNOWN_ITEMS = [
 ]
 SLOTS = 5
 TELEPORT_S = 2.0         # after Use, until we're close enough to talk
-SHOP_SETTLE_S = 0.6      # longest we wait for the shop to fade in
+SHOP_WAIT_S = 8.0        # Shop -> dialogue slides off -> fade to black -> fade back
+MESSAGE = (0.275, 0.835, 0.725, 0.865)    # the shop's answer line: green "You purchased ...", red on errors
+TIER = re.compile(r'(?i)(?:un)?c[o0]mm[o0]n|r[ao]re|ep[il1]c|legend[ao]ry|myth[il1]c[ao]l')
 OCR_THREADS = 2          # 2 is as accurate as 4 and uses less CPU
 
 _reader = None
@@ -41,8 +44,8 @@ def wanted_from_text(text):
 
 
 def clean(text):
-    text = text.lower().replace('1', 'i')          # the shop font's I reads as 1
-    for r in ('common', 'uncommon', 'rare', 'epic', 'legendary', 'mythical'):
+    text = text.lower().replace('1', 'i').replace('a', 'o')     # the shop font's I reads as 1 and its a as o
+    for r in ('common', 'uncommon', 'rore', 'epic', 'legendory', 'mythicol'):
         text = text.replace(r, '')
     return re.sub(r'\s+', ' ', re.sub(r'[^a-z ]', '', text)).strip()
 
@@ -51,7 +54,7 @@ def numeral(raw, base):
     """How many I's follow `base` (OCR reads II as 11, ll or Il), or None."""
     t = raw.lower()
     i = t.rfind(base)
-    m = re.match(r'\s*([1il|]{1,3})(?![a-z])', t[i + len(base):]) if i >= 0 else None
+    m = re.match(r'[\s.:-]*([1il|]{1,3})(?![a-z]{2})', t[i + len(base):]) if i >= 0 else None     # 'lle' is II + junk
     return len(m.group(1)) if m else None
 
 
@@ -63,10 +66,13 @@ def identify(text, names):
     name = _identify(text, names)
     m = re.match(r'^(.*\S)\s+(I{1,3})$', name or '')
     if m:
-        n = numeral(raw, m.group(1).split()[-1].lower())
-        same = '%s %s' % (m.group(1), 'I' * n) if n else None
-        if same in names:
-            name = same
+        base = m.group(1).split()[-1].lower()
+        n = numeral(raw, base)
+        if not n and base in raw.lower():           # the numeral was lost: without it I, II and III look alike
+            return None
+        same = [x for x in ('%s %s' % (m.group(1), 'I' * k) for k in (n or 0, (n or 0) - 1) if k) if x in names]
+        if same:                                    # one less: the title's | glued on as one more I
+            name = same[0]
     return name
 
 
@@ -77,7 +83,7 @@ def _identify(text, names):
         if c and c.replace(' ', '') in text.replace(' ', ''):        # OCR is sloppy with spaces
             return name
         c, t = c.replace(' ', ''), text.replace(' ', '')
-        # the panel title runs on into a misread rarity ('HeovenlyPotion ILegendory'), so the start counts too
+        # the panel title can run into a misread rarity, so the start counts too
         r = max(difflib.SequenceMatcher(None, c, t).ratio(), difflib.SequenceMatcher(None, c, t[:len(c)]).ratio())
         if r > score:
             best, score = name, r
@@ -104,7 +110,7 @@ def read_lines(img):
 
 
 def identify_lines(lines, names):
-    """Each line on its own first (rarity or price next to a name throws it off), then all together."""
+    """Each line on its own first, then all together."""
     for line in lines:
         item = identify(line, names)
         if item:
@@ -112,8 +118,23 @@ def identify_lines(lines, names):
     return identify(' '.join(lines), names) if len(lines) > 1 else None
 
 
-def read_slot(i):
-    return read_lines(points.grab('merchantShopItem[%d]' % i))
+def read_slot(i, scale=2):
+    """Twice the size by default: OCR loses numerals far less often then."""
+    img = points.grab('merchantShopItem[%d]' % i)
+    if img is None or img.size == 0:
+        return []
+    return read_lines(cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC) if scale > 1 else img)
+
+
+def slot_item(i, names):
+    """A slot shows the name alone, so read it whole (OCR often splits off the numeral).
+    Nothing at 2x: try 1x."""
+    for scale in (2, 1):
+        lines = read_slot(i, scale)
+        item = identify(' '.join(lines), names) or identify_lines(lines, names)
+        if item or not lines:
+            return item
+    return None
 
 
 def nap(seconds, halt):
@@ -145,7 +166,7 @@ def use_item(term, halt, say):
         say('no %s used' % what)
         shut_inventory()
         return False
-    if halt() or not game.press_point('slot%d' % (slot + 1), 0.2) or not game.press_point('use', 0.3):
+    if halt() or not game.use_slot(slot, say, 0.2, halt):
         shut_inventory()
         return False
     shut_inventory()
@@ -161,53 +182,47 @@ def teleport(halt, say):
 
 
 def open_shop(halt):
-    """Talk, pick the green choice, then Leave so the dialogue isn't over the shop. Three tries."""
+    """Talk, pick the green choice, Leave whatever dialogue is left. Three tries."""
     for _ in range(3):
         if halt():
             return False
-        game.down('e')
-        time.sleep(0.05)
-        game.up('e')
-        if not nap(0.3, halt):
-            return False
-        for _ in range(3):
-            points.click('dialogueSkipDialogue', 0.1)
-        if not nap(0.3, halt):
-            return False
+        if not points.dialogue_up():                    # E again mid-dialogue would only be refused
+            game.down('e')
+            time.sleep(0.05)
+            game.up('e')
+            if not nap(0.3, halt):
+                return False
+            for _ in range(3):
+                points.click('dialogueSkipDialogue', 0.1)
+            if not nap(0.3, halt):
+                return False
         at = points.choice('green') if points.dialogue_up() else None     # or a green aura glow would count
         if at is not None:
             game.click(*at, park=False)
-            if not settle(halt):
+            if not nap(0.5, halt):
                 return False
+            if points.dialogue_up():                    # a click clears every choice at once: this one was lost
+                continue
             return not points.leave_dialogue() or nap(0.3, halt)
     return False
 
 
-def settle(halt):
-    """Wait out the shop's fade-in (two identical grabs in a row)."""
-    end, prev = time.perf_counter() + SHOP_SETTLE_S, None
-    while time.perf_counter() < end:
-        if halt():
-            return False
-        cur = points.grab('merchantShopProductListRoot')
-        if cur is None:
-            return False
-        if prev is not None and cur.shape == prev.shape and np.array_equal(cur, prev):
-            return True
-        prev = cur
-        time.sleep(0.03)
-    return nap(0.1, halt)
-
-
 def read_shop(names, halt):
-    """{slot: item} for what could be read, with a second look at the rest."""
+    """{slot: item} once the shop has faded in, with a second look at the rest."""
+    end, k = time.perf_counter() + SHOP_WAIT_S * game.PACE, 0
+    while not slot_item(k % SLOTS + 1, names):                  # it comes up 1-3 s after Shop
+        k += 1
+        if time.perf_counter() > end or not nap(0.1, halt):
+            break
+    if not nap(0.6, halt):                                      # the rest of its 0.5 s fade from black
+        return {}
     found = {}
     for attempt in range(2):
         for i in range(1, SLOTS + 1):
             if i in found or halt():
                 continue
             try:
-                item = identify_lines(read_slot(i), names)
+                item = slot_item(i, names)
             except Exception:
                 item = None
             if item:
@@ -217,22 +232,115 @@ def read_shop(names, halt):
     return found
 
 
-def selected(names):
+def title(lines):
+    """The name in the panel's 'Name | Tier'. OCR can glue the | onto the name as I, l, 1 or T."""
+    text = ' '.join(lines)
+    m = TIER.search(text)
+    if not m:
+        return text
+    name = re.sub(r'[^\w\s|]', '', text[:m.start()]).rstrip()          # OCR adds - and . too
+    return name[:-1] if name[-1:] in '|I1T' else name
+
+
+def selected(names, scale=1):
     """What the detail panel says is picked, i.e. what Purchase would buy."""
     img = points.grab('merchantShopproductDetailPanel')
     if img is None or img.size == 0:
         return None
-    return identify_lines(read_lines(img[:max(1, img.shape[0] * 3 // 10)]), names)
+    img = img[:max(1, img.shape[0] * 3 // 10)]
+    lines = read_lines(cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC) if scale > 1 else img)
+    return identify(title(lines), names) or identify_lines(lines, names)
+
+
+def lit(name):
+    """A shop button's white text is showing, with no dark veil over it."""
+    img = points.grab(name)
+    return img is not None and img.size > 0 and float((img.min(-1) > 200).mean()) >= 0.01
+
+
+def answer_band():
+    """The shop's answer line and its green and red text pixels. The newest line sits in the middle of MESSAGE."""
+    rgb = game.grab(game.client_box(MESSAGE))
+    c = rgb.astype(int)
+    r, g, b = c[..., 0], c[..., 1], c[..., 2]
+    return rgb, (g > 200) & (r < 120) & (b < 120), (r > 200) & (g < 120) & (b < 120)
+
+
+def wait(test, seconds, halt):
+    end = time.perf_counter() + seconds * game.PACE
+    while not test():
+        if halt() or time.perf_counter() > end:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def answer(before, halt):
+    """Wait for a new answer line: 'good', 'sold', 'poor', 'limit', 'error' or None.
+    Only newly lit pixels count."""
+    _, g0, r0 = before
+    start, idle = time.perf_counter(), 0
+    while True:
+        _, g, r = answer_band()
+        if int((g & ~g0).sum() + (r & ~r0).sum()) > 20 + 0.05 * int(g0.sum() + r0.sum()):
+            break
+        late = time.perf_counter() - start
+        idle = idle + 1 if late > 1.0 * game.PACE and lit('merchantShopPurchaseButton') else 0
+        if idle >= 2 or late > 6.0 * game.PACE or halt():      # no veil either: the click was lost
+            return None
+        time.sleep(0.1)
+    if not nap(0.35, halt):                                     # it grows in over 0.3 s
+        return None
+    rgb, g, r = answer_band()
+    h = rgb.shape[0]
+    text = re.sub(r'[^a-z]', '', ''.join(read_lines(rgb[h // 10:h * 9 // 10])).lower()).replace('a', 'o')
+    for word, kind in (('error', 'error'), ('internol', 'error'), ('ldout', 'sold'), ('enou', 'poor'), ('dont', 'poor'),
+                       ('lreody', 'limit'), ('purch', 'good')):
+        if word in text:
+            return kind
+    g, r = int((g & ~g0)[h // 10:h * 9 // 10].sum()), int((r & ~r0)[h // 10:h * 9 // 10].sum())
+    return 'good' if g > r else 'error'
+
+
+def purchase(amount, halt):
+    """Set the amount (None = Set to Max), Purchase, read the answer."""
+    if not wait(lambda: lit('merchantShopPurchaseButton'), 8.0, halt):       # still loading, or buying the last one
+        return None
+    if amount is None:
+        points.click('merchantShopSetToMaxButton', 0.15)
+    else:
+        points.click('merchantShopPurchaseAmountBox', 0.15)
+        for key in (game.Key.backspace, game.Key.delete):      # it clears on focus, and holds a few digits at most
+            for _ in range(4):
+                game.tap(key, hold=0.01, gap=0.01)
+        game.type_term(str(amount), clear=False)
+    before = answer_band()
+    if halt() or not points.click('merchantShopPurchaseButton', 0.3):
+        return None
+    return answer(before, halt)
+
+
+def box_number():
+    """The amount box after Set to Max: the stock left. Its 1 can read as 7: the smaller wins."""
+    img = points.grab('merchantShopPurchaseAmountBox')
+    if img is None or img.size == 0:
+        return 0
+    reads = []
+    for im in (img, cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)):
+        digits = re.sub(r'\D', '', ''.join(read_lines(im)).replace('O', '0'))
+        if digits:
+            reads.append(int(digits))
+    return min(reads) if reads else 0
 
 
 def buy(slot, item, amount, names, halt, say=print):
-    """Pick the slot, set the amount, Purchase. Checks the panel first, a swallowed click would buy the last pick."""
+    """Pick the slot, set the amount, Purchase. Checks the panel first: a lost click would buy the last pick."""
     if halt() or not points.click('merchantShopItem[%d]' % slot, 0.2):
         return False
     shown = None
-    for _ in range(3):
+    for k in range(3):
         try:
-            shown = selected(names)
+            shown = selected(names, 1 + k % 2)          # 1x and 2x misread different numerals
         except Exception:
             shown = None
         if shown == item or halt():
@@ -241,21 +349,36 @@ def buy(slot, item, amount, names, halt, say=print):
     if shown != item:
         say('not buying %s: the shop shows %s picked' % (item, shown or 'something unreadable'))
         return False
-    if amount is None:
-        points.click('merchantShopSetToMaxButton', 0.15)
-    else:
-        points.click('merchantShopPurchaseAmountBox', 0.15)
-        game.type_term(str(amount))
-    if halt():
-        return False
-    return points.click('merchantShopPurchaseButton', 0.3)
+    n, left, retries, bought = amount, amount, 1, False     # left: still to buy, None = all of it
+    while not halt():
+        got = purchase(n, halt)
+        if got == 'good':
+            bought = True
+            if n == left:                           # all of it (None: Set to Max took the stock)
+                break
+            left = None if left is None else left - n
+            n = min(n // 2, 10 ** 6 if left is None else left)    # the last try was too dear: keep halving
+            if n < 1:
+                break
+        elif got == 'poor':                         # not enough money: halve
+            n = min(box_number(), n or 10 ** 6) // 2      # the count must drop, whatever the box reads
+            if n < 1:
+                break
+        elif got in ('sold', 'limit') or retries < 1:   # one more go for a lost click or a server error
+            break
+        else:
+            retries -= 1
+    if not bought:
+        say('%s not bought' % item)
+    return bought
 
 
 def collect(merchant, wanted, halt, say=print):
-    """Teleport, read the shop, buy. Returns ({slot: name}, [bought]), or None if the shop never opened."""
+    """Teleport, read the shop, buy. Returns ({slot: name}, [bought]), None if the shop never opened,
+    False if the teleport didn't happen."""
     say('%s arrived: using a Merchant Teleporter' % merchant)
     if not teleport(halt, say):
-        return None
+        return False
     if not open_shop(halt):
         say('%s\'s shop did not open' % merchant)
         return None
@@ -267,12 +390,15 @@ def collect(merchant, wanted, halt, say=print):
         say('none of the buy list is here (list: %s)' % (', '.join(wanted) or 'empty'))
     bought = []
     for slot, item in sorted(found.items()):
-        if item in wanted and buy(slot, item, wanted[item], names, halt, say):
+        if item in wanted and buy(slot, item, wanted[item], names, halt, say):     # all names: a slot can be misread
             bought.append(item if wanted[item] is None else '%s x%d' % (item, wanted[item]))
     return found, bought
 
 
 def close_shop():
-    points.click('merchantShopCloseButton', 0.2)
-    time.sleep(0.4)
+    for _ in range(3):                                      # a lost click on the small X leaves the shop up
+        points.click('merchantShopCloseButton', 0.2)
+        time.sleep(0.6)
+        if not any(slot_item(i, KNOWN_ITEMS) for i in (1, SLOTS)):
+            break
     points.leave_dialogue(skip=True)                        # the dialogue can outlive the shop

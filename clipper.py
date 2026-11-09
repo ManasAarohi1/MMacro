@@ -1,4 +1,4 @@
-"""Auto clip rare auras: a rolling buffer of the Roblox window, saved as a video when a rare one rolls."""
+"""Auto clip rare auras: keeps recent frames and saves a video when a rare one rolls."""
 import collections
 import ctypes
 import json
@@ -48,11 +48,11 @@ def _read(body):
     if not isinstance(d, dict):
         return {}
     return {k: v for k, v in d.items() if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int)
-            and isinstance(v[1], dict)}
+            and isinstance(v[1], dict) and all(isinstance(m, int) for m in v[1].values())}
 
 
 def _load():
-    """The list built into the exe, with the fetched one on top (it can add and change, never remove)."""
+    """The built-in list, with the fetched one on top (it can add and change, never remove)."""
     here = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
     auras = {}
     for path in (os.path.join(here, 'auras.json'), LIVE):
@@ -65,7 +65,7 @@ def _load():
 
 
 def refresh(timeout=10):
-    """Fetches the aura list from GitHub so new auras count without a new build. Returns how many are known."""
+    """Fetch the aura list from GitHub. Returns how many are known."""
     global _names, _table
     req = urllib.request.Request(AURAS_URL, headers={'User-Agent': 'MMacro'})
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -217,8 +217,7 @@ def press_keys(text):
 
 
 def bgr(rgb, height=HEIGHT):
-    """game.grab's RGB -> BGR, at most `height` tall (never scaled up). Uses the BGRA buffer under it, opencv is
-    far faster on that."""
+    """game.grab's RGB -> BGR, at most `height` tall, never scaled up."""
     b = rgb.base
     if isinstance(b, np.ndarray) and b.shape == rgb.shape[:2] + (4,) and rgb.ctypes.data - b.ctypes.data == 2:
         img, code = b, cv2.COLOR_BGRA2BGR
@@ -268,7 +267,7 @@ class Clipper:
         self._drop()
 
     def _drop(self):
-        """Free the buffer once stopped and no clip needs it, it's most of MMacro's memory."""
+        """Free the buffer once nothing needs it; it's most of the memory."""
         with self.lock:
             if self.stop_event.is_set() and not self.saves:
                 self.frames.clear()
@@ -315,7 +314,7 @@ class Clipper:
 
 
 class KeyClipper(Clipper):
-    """Presses the clip key of the player's own recorder (Game Bar, Medal, ShadowPlay...) instead.
+    """Presses the player's own recorder clip key (Game Bar, Medal, ShadowPlay...) instead.
     Only keeps a few frames for the embed picture."""
 
     def __init__(self, keys, say=print):

@@ -1,5 +1,5 @@
 """Keep one aura equipped through Aura Storage.
-The Equip/Unequip button wins over Roblox's log, which sometimes keeps naming the old aura."""
+The Equip/Unequip button wins over the log, which can keep naming the old aura."""
 import difflib
 import re
 import time
@@ -9,11 +9,12 @@ import numpy as np
 
 import clipper
 import game
+import labels
 import merchant
 import points
 
 TRIES = 3               # searches before giving up
-EQUIP_WAIT_S = 3.0      # wait for Unequip (or the log) after pressing Equip
+EQUIP_WAIT_S = 10.0     # wait for Unequip (or the log) after Equip; never press twice
 CELLS = ['auraStorageAuraCell[1,%d]' % c for c in range(1, 9)] + ['auraStorageAuraCell[2,%d]' % c for c in range(1, 9)]
 REGULAR = 'auraStorageAuraRegularTab'
 NAME_AREA = ('auraStorageAuraSelectedPreview', 'auraStorageAuraInfoPanel')
@@ -39,29 +40,40 @@ def resolve(text):
 
 def search_term(name):
     """What to type in search: the name without symbols if that still matches, else its longest word.
-    Cells get read afterwards, so a shared word is fine."""
+    Symbols like - [ ] + . go in as '.' (any one)."""
+    name = name.replace('_', ' : ')
     for keep in (r'[^\x20-\x7e]+', r'[^A-Za-z0-9 ]+'):
         plain = re.sub(r'\s+', ' ', re.sub(keep, ' ', name)).strip()
         if len(plain) >= 3 and plain.lower() in name.lower():
-            return plain
+            return re.sub(r'[\^$()%.\[\]*+?-]', '.', plain)
     words = re.findall(r'[A-Za-z0-9]+', name)
     return max(words, key=len) if words else ''
 
 
 def read(rgb, small=40):
-    """OCR lines, upscaled 3x when small (a 768p button is only 18 px tall)."""
+    """OCR lines, upscaled 3x when small."""
+    return [t for t, _, _ in read_rows(rgb, small)]
+
+
+def read_rows(rgb, small=40):
+    """OCR lines as (text, top, bottom), in rgb's pixels."""
     if rgb is None or rgb.size == 0:
         return []
-    if rgb.shape[0] < small:
-        rgb = cv2.resize(rgb, (rgb.shape[1] * 3, rgb.shape[0] * 3), interpolation=cv2.INTER_CUBIC)
-    return merchant.read_lines(rgb)
+    k = 3 if rgb.shape[0] < small else 1
+    if k > 1:
+        rgb = cv2.resize(rgb, (rgb.shape[1] * k, rgb.shape[0] * k), interpolation=cv2.INTER_CUBIC)
+    result, _ = merchant.reader()(np.ascontiguousarray(rgb[..., ::-1]), use_cls=False)
+    return [(t, min(p[1] for p in box) / k, max(p[1] for p in box) / k) for box, t, _ in result or []]
 
 
 def button():
-    """'equip', 'unequip' or None if unsure. Never press on None, on a worn aura the same button takes it off."""
+    """'equip', 'unequip' or None if unsure. Never press on None: on a worn aura it takes it off."""
     rgb = points.grab('auraStorageAuraEquipButton')
     if rgb is None or rgb.size == 0:
         return None
+    seen = labels.equip_button(rgb)                     # by its look first, OCR only if unsure
+    if seen and lettering(rgb) in (seen, None):
+        return seen
     words, ink = norm(' '.join(read(rgb))), lettering(rgb)
     if 'nequip' in words or 'unequ' in words:
         return 'unequip'
@@ -91,22 +103,57 @@ def shown():
     if None in boxes:
         return None
     area = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
-    lines = read(game.grab(area), small=200)
+    rows = read_rows(game.grab(area), small=200)
+    lines = [t for t, _, _ in rows]
     keys = {fold(n): n for n in clipper.names() if fold(n)}
-    # long names wrap, so try line pairs first or "Rage :" would pass as "Rage"
-    tries = [fold(t) for t in [a + b for a, b in zip(lines, lines[1:])] + lines if fold(t)]
-    for line in tries:
-        if line in keys:
-            return keys[line]
-    for line in tries:
-        close = difflib.get_close_matches(line, list(keys), n=1, cutoff=0.8)
-        if close:
-            return keys[close[0]]
+    p = boxes[0]
+    mid = p[1] - area[1] + 0.4 * (p[3] - p[1])      # where a one-line name is centred
+    # only the name line: "STARSCOURGE" + "[Information]" must not pass as STARSCOURGE : RADIANT
+    rows = [r for r in rows if (r[1] + r[2]) / 2 < p[3] - area[1] and odds_of(r[0]) is None]
+    # long names wrap, so try line pairs first, near misses too
+    pairs = [(a[0] + b[0], a[1], b[2], 2) for i, a in enumerate(rows) for b in rows[i + 1:]]   # world text sits between
+    for tries in (pairs, [r + (1,) for r in rows]):
+        tries = [(fold(t), mid - (top + bot) / 2 > 0.25 * (bot - top) / n) for t, top, bot, n in tries if fold(t)]
+        for line, high in tries:
+            if line in keys:
+                return odds_check(keys[line], lines, high)
+        for line, high in tries:
+            close = difflib.get_close_matches(line, list(keys), n=1, cutoff=0.8)
+            if close:
+                return odds_check(keys[close[0]], lines, high)
+    for t, _, _ in rows:                        # world text behind the panel can join in
+        inside = [k for k in keys if len(k) >= 4 and k in fold(t)]
+        if inside:                              # the rest may be a misread longer name: odds decide
+            return odds_check(keys[max(inside, key=len)], lines, True)
     return None
 
 
+def odds_check(name, lines, high=False):
+    """`name`, unless it may be the start of a longer name whose 2nd line OCR lost.
+    The "1 in N" line tells them apart. Without it: None if the name sits `high`, else `name`."""
+    table = clipper.table()
+    longer = [k for k in table if k != norm(name) and k.startswith(norm(name))]
+    if not longer:
+        return name
+    odds = next((odds_of(t) for t in lines if odds_of(t) is not None), None)
+    if odds is None:
+        return None if high else name
+    if odds == table[norm(name)][0]:
+        return name
+    match = [k for k in longer if table[k][0] == odds]
+    if len(match) == 1:
+        return next(n for n in clipper.names() if norm(n) == match[0])
+    return None if match else name             # an odd number that fits no longer name is a misread
+
+
+def odds_of(line):
+    """N from a "1 in N" line, else None."""
+    hit = re.fullmatch(r'[1il|t]?(?:[il1|]n|m)([0-9o][0-9o,.]*)', re.sub(r'\s', '', line.lower()))
+    return int(re.sub(r'[^0-9]', '', hit.group(1).replace('o', '0'))) if hit else None
+
+
 def fold(text):
-    """norm with o and a merged, OCR reads the game's a as o ("Roge", "Abyssol")."""
+    """norm with o and a merged: OCR reads a as o."""
     return norm(text).replace('o', 'a')
 
 
@@ -120,7 +167,7 @@ def nap(seconds, halt):
 
 
 def find(aura, halt, say, skip=()):
-    """Search the open Aura Storage, click cells (minus `skip`) until the panel names `aura`. The cell, or None."""
+    """Search the open Aura Storage and click cells (minus `skip`) until the panel names `aura`. The cell, or None."""
     if halt() or not points.click(REGULAR, 0.2) or not points.click('auraStorageAuraSearchContent', 0.15):
         return None
     game.type_term(search_term(aura))
@@ -138,14 +185,14 @@ def find(aura, halt, say, skip=()):
 
 
 def shut():
-    """Close Aura Storage, or click its X anyway (with nothing open that spot is just the world)."""
+    """Close Aura Storage, or click its X anyway."""
     if not game.close_inventory():
         points.click('auraStorageAuraCloseButton', 0.2)
 
 
 def equip(aura, halt, say=print, logged=lambda since: False, other=lambda since: None):
     """Equip `aura` through Aura Storage. True once it's on.
-    logged(since): the log says it went on since then. other(since): some other aura that did, or None."""
+    logged(since): the log says it went on. other(since): some other aura that did, or None."""
     if game.take_foreground() is None:
         return False
     wrong = set()                               # cells that turned out to be another aura
@@ -166,6 +213,12 @@ def equip(aura, halt, say=print, logged=lambda since: False, other=lambda since:
             say('%s not found in Aura Storage (go %d of %d)' % (aura, go, TRIES))
             continue
         state = button()
+        now = shown()                           # a cell click can land late: the panel read may be old
+        if now is not None and norm(now) != norm(aura):
+            wrong.add(cell)
+            shut()
+            say('%s turned out to be %s (a cell click landed late) (go %d of %d)' % (cell, now, go, TRIES))
+            continue
         if state == 'unequip':
             say('%s is equipped (its button says Unequip)' % aura)
             shut()
@@ -196,14 +249,22 @@ def equip(aura, halt, say=print, logged=lambda since: False, other=lambda since:
             wrong.add(cell)
             shut()
             continue
+        now = shown() if how else None          # clicks land in order, so the panel now names what really went on
+        if now is not None and norm(now) != norm(aura):
+            say('%s went on instead (a cell click landed late): trying the next one (go %d of %d)' % (now, go, TRIES))
+            wrong.add(cell)
+            shut()
+            continue
         if how:
             say('%s equipped (%s)' % (aura, how))
             shut()
             return True
         if halt():
             return False
-        say('%s not equipped yet: searching again (go %d of %d)' % (aura, go, TRIES))
+        # never press again: the same button takes it off
+        say('%s not equipped yet: its press may still land, so it is checked again later' % aura)
         shut()
+        return False
     if not halt():
         say('%s could not be equipped after %d goes' % (aura, TRIES))
     return False

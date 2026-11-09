@@ -81,7 +81,7 @@ _settings_lock = threading.Lock()
 
 
 def save_settings(cfg):
-    """Merge into the stored file. Retries the swap because antivirus can hold the file."""
+    """Merge into the stored file. Retries the swap since antivirus can lock it."""
     with _settings_lock:
         merged = load_settings()
         merged.update(cfg)
@@ -218,11 +218,11 @@ def newest_log(log_dir=LOG_DIR):
     return names[0] if names else None
 
 
-STUB_QUIET_S = 10        # quiet this long = dead (a launch stub whose game moved to the tray client)
+STUB_QUIET_S = 10        # quiet this long = dead (a launch stub handed off to the tray client)
 
 
 def moved_on(latest, path):
-    """Switch from `path` to `latest`? Yes if it was born later (not written later: two clients would flip-flop),
+    """Switch to `latest`? Yes if it was born later (write times flip-flop between two clients)
     or once `path` has gone quiet."""
     if latest is None or latest == path:
         return False
@@ -327,9 +327,10 @@ def set_pace(base):
 
 def fresh_session():
     """Reset per-run state on Start."""
-    global _window, _said_refused
+    global _window, _said_refused, USE_DEAD, USE_GIVE_UPS
     _window = (0.0, None)
     _said_refused = False
+    USE_DEAD, USE_GIVE_UPS = False, 0
 
 
 kb = KeyboardController()
@@ -404,11 +405,11 @@ def up(key):
 
 
 STUCK_VK = (0x5B, 0x5C, 0x12, 0xA4, 0xA5, 0x79, 0x09, 0x25, 0x26, 0x27, 0x28, 0xA0, 0xA1, 0xA2, 0xA3)
-# keys we never send, lifted if something left them down. A stuck Win key means Start menu over everything.
+# keys we never send, lifted if left down. A stuck Win key opens Start over everything.
 
 
 WIN_VKS = (0x5B, 0x5C)
-MASK_VK = 0xE8              # dead key tapped before Win goes up so Start doesn't open (AutoHotkey's trick)
+MASK_VK = 0xE8              # tap a dead key before Win goes up so Start stays shut (AutoHotkey's trick)
 
 
 def _key(vk, up):
@@ -528,11 +529,8 @@ def move_to(x, y, settle=MOVE_DELAY_S):
 
 
 def button(name, down):
-    """Press or release a mouse button.
-
-    Presses carry the position, or scaling / a second monitor can land them on a stale one.
-    Releases don't: Roblox pins the pointer during a camera drag and the jump would undo it.
-    """
+    """Press or release a mouse button. Presses carry the position so scaling can't misplace them;
+    releases don't, since Roblox pins the pointer during a camera drag."""
     if u32.GetSystemMetrics(23):                   # left-handed mouse setting
         name = {'left': 'right', 'right': 'left'}.get(name, name)
     if not down:
@@ -622,7 +620,7 @@ CLIENT_EXES = {'robloxplayerbeta.exe', 'robloxplayerlauncher.exe', 'robloxplayer
 
 
 def mine(pid):
-    """Is this pid in our Windows session? RDP logins and other accounts share the process list."""
+    """Is this pid in our Windows session? RDP and other accounts share the process list."""
     k, a, b = ctypes.windll.kernel32, wintypes.DWORD(), wintypes.DWORD()
     try:
         return (bool(k.ProcessIdToSessionId(os.getpid(), ctypes.byref(a)))
@@ -685,7 +683,7 @@ def foreground_hwnd():
 
 
 def force_foreground(hwnd):
-    """Bring hwnd to the front. Never AttachThreadInput: a shared input queue can freeze both programs."""
+    """Bring hwnd to the front. Never AttachThreadInput: it can freeze both programs."""
     user32 = ctypes.windll.user32
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, 9)
@@ -741,7 +739,7 @@ def _window_at(x, y):
 
 
 def click_to_front():
-    """Click a dead spot on Roblox to bring it forward, only if nothing covers it. True if it worked."""
+    """Click a dead spot on Roblox to bring it forward, if nothing covers it. True if it worked."""
     global _clicked_front
     if time.monotonic() - _clicked_front < FRONT_CLICK_EVERY:
         return False
@@ -887,8 +885,8 @@ def hsv(rgb):
 
 
 def window_part(box, w, h):
-    """A part of the Inventory window (fractions of a 16:9 client) in pixels of a w x h client.
-    The window is half the client wide and centred, so heights go from the middle."""
+    """Part of the Inventory window (fractions of a 16:9 client) in pixels of a w x h client.
+    It's half the client wide and centred, so heights go from the middle."""
     y = lambda f: int(round(h / 2.0 + (f - 0.5) * w * 9.0 / 16.0))
     return int(round(box[0] * w)), y(box[1]), int(round(box[2] * w)), y(box[3])
 
@@ -904,8 +902,8 @@ WINDOW_TOP = 0.2556      # window's top edge on a 16:9 client
 
 
 def inventory_open(rgb=None):
-    """Is the Inventory / Aura Storage up? White title and X on something darker, plus the frame's top edge.
-    The frame is see-through, so its brightness depends on what's behind it."""
+    """Is the Inventory / Aura Storage up? White title and X on something darker, plus the window's top edge.
+    It's see-through, so its brightness depends on what's behind it."""
     if rgb is None:
         rgb = grab(client_box((0.0, 0.0, 1.0, 1.0)))
     h, w = rgb.shape[:2]
@@ -1058,6 +1056,12 @@ JOINED = ('Connection accepted from', 'Replicator created for player')
 GAME_OUTPUT = '[FLog::Creator'
 FROZEN = 'frozen'
 REJOIN_GRACE_S = 30.0   # give the game's own rejoin this long first
+def tidy_link(text):
+    """Cut a pasted link's code where it stops ('...136155Roblox' has a word stuck on)."""
+    text = re.sub(r'(privateServerLinkCode=\d+)[^\d&#\s]+', r'\1', (text or '').strip(), flags=re.I)
+    return re.sub(r'(code=[a-fA-F0-9]{32})[^&#\s]+', r'\1', text, flags=re.I)
+
+
 def deeplink(text):
     """roblox:// link for a game or private server URL, or None. A private link never falls back to public."""
     m = re.search(r'https?://\S+', text or '')
@@ -1142,7 +1146,7 @@ class Watch:
                             self.menu_at = time_from_line(line) or now
                         if aura is not None and aura != self.aura:
                             self.aura = aura
-                    if GAME_OUTPUT in line:         # game script prints, skip
+                    if GAME_OUTPUT in line:         # the game's own log lines, skip
                         continue
                     if any(k in line for k in LOST):
                         if self.state != 'lost':
@@ -1228,7 +1232,7 @@ def play_mask(rgb):
 
 def find_play():
     """Play button centre on the title screen, or None. It must sit on Play's box with little green above,
-    since in-game grass is the same green."""
+    since grass is the same green."""
     import points
     button = points.box('loadingPlayButton')
     if button is None:
@@ -1301,7 +1305,7 @@ def press_play(watch, stop=lambda: False, say=lambda m: None, timeout=90.0, play
 
 
 def roblox_processes():
-    """Roblox client processes in this session, by exact exe name (so not Studio or other tools)."""
+    """Roblox client processes in this session, by exact exe name."""
     out = []
     for p in psutil.process_iter(['name']):
         try:
@@ -1313,8 +1317,8 @@ def roblox_processes():
 
 
 def roblox_elevated():
-    """Is Roblox running as admin while we aren't? Windows then silently drops our input.
-    Access denied on its token is how it shows."""
+    """Is Roblox running as admin while we aren't? Then Windows drops our input.
+    It shows as access denied on its token."""
     if ctypes.windll.shell32.IsUserAnAdmin():
         return False
     k32 = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -1387,8 +1391,7 @@ MORE_TABS = 10           # extra copies of the page to close (earlier launches)
 
 
 def opened_tab(before, wait=TAB_WAIT_S):
-    """hwnd of the browser window showing the page we just opened, or None. Every tab has the same title,
-    so the front window counts first."""
+    """hwnd of the browser window showing our page, or None. Tabs share a title, so the front window goes first."""
     end = time.monotonic() + wait
     while time.monotonic() < end:
         front, wins = foreground_hwnd(), browser_windows()
@@ -1446,7 +1449,7 @@ def came_back(log_dir, stop, wait):
 
 def player_command(scheme):
     """Command desktop Roblox registered for this scheme, else the newest RobloxPlayerBeta.exe.
-    None if there's only the Store version (Windows may prefer it for these links)."""
+    None if only the Store version exists (Windows may prefer it)."""
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Classes\%s\shell\open\command' % scheme) as k:
             command = winreg.QueryValueEx(k, '')[0]
@@ -1482,7 +1485,7 @@ def open_link(target, say=lambda m: None):
 
 def rejoin(link, say=lambda m: None, stop=lambda: False, log_dir=None, browser=False, frozen=False):
     """Reopen the private server and wait till in game. True if in.
-    A running Roblox is closed first: right away if `frozen`, else after its own rejoin had a chance."""
+    A running Roblox is closed first: at once if `frozen`, else after its own rejoin had a go."""
     target = deeplink(link)
     if not target:
         say('the private server link is not a Roblox link')
@@ -1640,16 +1643,48 @@ MERCHANT_POINTS = (
     ('merchantShopCloseButton', 'Merchant shop: close (X)'),
 )
 BUILT_IN.update({name: name for name, _ in FISH_POINTS + MERCHANT_POINTS})
+BUILT_IN.update({'daily_claim': 'dailyRewardsClaimButton', 'daily_close': 'dailyRewardsCloseButton'})
 DAILY_WAIT_S = 2.0       # for their window to show after rejoining
 
 
-def daily_clicks_ready():
-    stored = load_points()
-    return all(name in stored for name, _ in DAILY_POINTS)
+DAILY_SHOW_S = 10.0      # how long its window may take to pop up after joining
 
 
-def daily_by_clicks():
-    return press_point('daily_claim', settle=1.0) and press_point('daily_close', settle=0.5)
+def daily_state(rgb=None):
+    """'claim' (green Claim up), 'claimed' (Claim dimmed) or None (no window).
+    Once claimed, a dark cover dims Claim's green."""
+    if rgb is None:
+        import points
+        rgb = points.grab('dailyRewardsClaimButton')
+    if rgb is None or rgb.size == 0:
+        return None
+    r, g, b = (rgb[..., i].astype(int) for i in range(3))
+    if (rgb.max(axis=2) < 45).mean() < 0.5:     # behind Claim, the dark cover leaves ~7% of the world
+        return None
+    greenish = (g - r > 40) & (g - b > 30) & (b >= r - 5)      # grass and leaves have less blue than red
+    if (greenish & (g > 200)).mean() > 0.03:
+        return 'claim'
+    if (greenish & (g > 90) & (g < 160)).mean() > 0.03:
+        return 'claimed'
+    return None
+
+
+def daily_by_clicks(halt=stopped):
+    """Claim if the window shows a live Claim, then close it. False if no window came up."""
+    end = time.monotonic() + DAILY_SHOW_S
+    state = daily_state()
+    while state is None and time.monotonic() < end and not halt():
+        paced(0.5)
+        state = daily_state()
+    if state is None:
+        return False
+    if state == 'claim':
+        press_point('daily_claim', settle=1.5)
+    for _ in range(3):
+        press_point('daily_close', settle=0.6)
+        if daily_state() is None:
+            break
+    return state
 
 
 def item_pass(say=print, terms=(BR, SC)):
@@ -1662,6 +1697,8 @@ def item_pass(say=print, terms=(BR, SC)):
     paced(SETTLE_S)
     used = []
     for term in terms:
+        if uses_dead(say):
+            break
         if click_use(term, say):
             used.append(term)
         else:
@@ -1706,8 +1743,8 @@ FIT_SIZES = ((1920, 1080), (1920, 1009), (1366, 768), (1366, 697))   # odd sizes
 
 
 def fit_window(say=print):
-    """Resize an odd-sized Roblox window to the biggest known size that fits. True if it's at a known size.
-    Fullscreen can't be resized from outside, so we just say so."""
+    """Resize an odd-sized Roblox window to the biggest known size that fits. True if at a known size.
+    Fullscreen can't be resized from outside, so just say so."""
     w = find_roblox_window()
     return w is not None and in_dpi(window_context(w.hwnd), _fit, w.hwnd, say)
 
@@ -1760,7 +1797,7 @@ def window_size():
 
 
 def load_points():
-    """Calibrated points as {name: (fx, fy)}. One for a built-in button only counts at the size it was set at."""
+    """Calibrated points as {name: (fx, fy)}. A built-in button's only counts at the size it was set at."""
     size = False
     out = {}
     for name, value in raw_points().items():
@@ -1807,7 +1844,7 @@ def to_screen(point):
 
 def press_point(name, settle=0.3, travel=GLIDE_S):
     """Click a button. False if it has no spot or Roblox won't come forward.
-    No window means no click: client_box's fallback size would put it somewhere random."""
+    No window, no click: the fallback size would land it somewhere random."""
     if find_roblox_window() is None:
         print('   no Roblox window to click in -- not clicking %s' % name)
         return False
@@ -1858,13 +1895,264 @@ def align_camera(stop=lambda: False):
     else:
         return False
     press_point('exit_collection', settle=0.5)
-    if collection_open() and not stop():
-        print('   Collection is still open: pressing Exit again')
+    for go in range(3):
+        if stop() or not collection_open():
+            return not stop()
+        # below 1440p the chat covers Exit; its top-bar button hides it.
+        # the last go flips it back, in case it was already hidden
+        print('   Collection is still open: %sExit again' % ('chat button, then ' if go else ''))
+        if go:
+            press_chat()
         press_point('exit_collection', settle=0.5)
-        if collection_open():
-            print('   Collection would not shut')
-            return False
+    if collection_open():
+        print('   Collection would not shut')
+        return False
     return not stop()
+
+
+CHAT_BUTTON = (138, 34)  # top bar's chat button from the client's top left, not scaled by window size
+
+
+def press_chat():
+    w = find_roblox_window()
+    if w is None:
+        return
+    x0, y0 = client_rect(w)[:2]
+    s = window_scale(w)
+    click(int(x0 + CHAT_BUTTON[0] * s), int(y0 + CHAT_BUTTON[1] * s), park=False)
+    paced(0.3)
+
+
+def inventory_shown():
+    """False only when the Inventory is known to be off screen (a cutscene or another window shut it)."""
+    return not sees_windows() or inventory_open()
+
+
+def reopened(halt=stopped):
+    """Bring the Inventory back after a cutscene or window shut it. Its search and pick survive."""
+    end = time.monotonic() + BACK_S * PACE
+    while not inventory_shown() and time.monotonic() < end:     # a cutscene gives it back by itself
+        if halt():
+            return False
+        paced(0.3)
+    return inventory_shown() or open_by_click('inventory', halt)
+
+
+def amount_one():
+    """Does the Use amount box read 1? A 1 is one narrow upright stroke; a caret is too thin to count."""
+    import points
+    rgb = points.grab('inventoryUseAmount')
+    if rgb is None or not rgb.size:
+        return False
+    h, w = rgb.shape[:2]
+    ink = rgb[h // 6:h * 5 // 6, w // 10:w * 9 // 10].min(-1) > 150
+    rows = np.nonzero(ink.any(1))[0]
+    if not rows.size:
+        return False
+    tall = rows[-1] - rows[0] + 1
+    strokes = [e - s + 1 for s, e in runs(np.nonzero(ink.any(0))[0], 1)]
+    strokes = [n for n in strokes if n > max(2, 0.12 * tall)]
+    return len(strokes) == 1 and strokes[0] < 0.45 * tall
+
+
+def use_one():
+    """Set the Use amount to 1; the box keeps the last amount and refuses more than owned.
+    False if it doesn't read 1 after (a lost click sends the keys to the game) or the Inventory went away."""
+    import points
+    if not inventory_shown():
+        return False
+    if amount_one():
+        return True
+    if not points.click('inventoryUseAmount', 0.1):
+        return False
+    for key in (Key.backspace, Key.delete):
+        for _ in range(8):
+            tap(key, hold=0.01, gap=0.01)
+    type_char('1')
+    return until(amount_one, 0.1, 2.0, paced) and inventory_shown()
+
+
+USE_WAIT_S = 5.0         # for the server to take one away
+USE_TRIES = 4            # Use presses per item, counting ones a cutscene or a shut Inventory ate
+DEAD_AFTER = 3           # Use presses on a picked item with nothing taken before item uses count as stopped
+BACK_S = 2.0             # wait for a cutscene to give the Inventory back before clicking it open
+LOOK_STEADY_S = 1.5      # how long a slot must stay the same before Use, so a late frame can't fake a use
+SHUTS_ON_USE = {'biome selector'}     # its own window opens and closes the Inventory
+USE_DEAD = False         # set once Roblox stops taking item uses (a refused use blocks them until a rejoin)
+USE_GIVE_UPS = 0         # uses given up after DEAD_AFTER presses; a use that takes or a rejoin clears it
+DEAD_GIVE_UPS = 2        # this many give-ups in a row = Use is dead: rejoin
+_searched = None         # the last term search_item found
+SEARCH_TRIES = 3
+RESULTS_S = 2.0          # for a slow grid to show the results
+
+
+def slot_look(slot):
+    """The slot's white 'xN' count and name colour, which change when one is used.
+    None if the Inventory is off screen or slots are unknown. Three brightness levels so small digits still differ."""
+    a, b = point_at('slot1'), point_at('slot2')
+    if a is None or b is None:
+        return None
+    x, y = (a, b)[slot]
+    left, top, _, _ = _window_rect()
+    rgb = _grab_window()
+    if sees_windows() and not inventory_open(rgb):
+        return None
+    pitch = math.hypot(b[0] - a[0], b[1] - a[1])
+    h = int(pitch / 2)
+    cx, cy = int(x - left), int(y - top)
+    ink = rgb[max(0, cy - h):cy + h, max(0, cx - h):cx + h].min(-1)
+    levels = (ink > 130).astype(np.uint8) + (ink > 170) + (ink > 215)
+    return levels.tobytes() + name_colour((cx, cy), rgb, pitch).encode()
+
+
+def steady(look):
+    """look() once it has held for LOOK_STEADY_S (a just-used slot can flick between frames).
+    None if the Inventory went away."""
+    end = time.monotonic() + 3 * LOOK_STEADY_S * PACE
+    last, since = look(), time.monotonic()
+    while last is not None and time.monotonic() - since < LOOK_STEADY_S * PACE and time.monotonic() < end:
+        paced(0.3)
+        now = look()
+        if now != last:
+            last, since = now, time.monotonic()
+    return last
+
+
+def use_taken(look, before):
+    """After a Use press: 'used' once the slot changes, 'gone' if the Inventory went off screen first, else 'same'."""
+    end = time.monotonic() + USE_WAIT_S * PACE
+    while True:
+        now = look()
+        if now is None:
+            return 'gone'
+        if now != before:
+            return 'used'
+        if time.monotonic() >= end:
+            return 'same'
+        paced(0.3)
+
+
+def looks_used(look, before, halt):
+    """The Inventory went away after Use: open it again and see if the slot changed. None if it can't be seen."""
+    if not reopened(halt):
+        return None
+    paced(1.0)                                  # a reply still on its way
+    a = look()
+    paced(0.3)
+    b = look()
+    if a is None or b is None or a != b:
+        return None
+    return a != before
+
+
+def use_lit():
+    """Is Use live (an item picked)? Unpicked, its word is dimmed but its white corner marks stay bright."""
+    import points
+    rgb = points.grab('inventoryUseButton')
+    if rgb is None or not rgb.size:
+        return False
+    h, w = rgb.shape[:2]
+    return int((rgb[h // 5:h * 4 // 5, w // 5:w * 4 // 5].min(-1) > 215).sum()) > 4
+
+
+def use_lit_after(want, wait_s=2.0):
+    end = time.monotonic() + wait_s * PACE
+    while use_lit() != want and time.monotonic() < end:
+        paced(0.25)
+    return use_lit() == want
+
+
+def picked(click_slot, say, settle=0.25):
+    """Pick a slot so Use is live, never leaving an older pick for Use to spend. False if it won't take."""
+    old = use_lit()                             # an old pick survived (the Items tab click was lost): Use would spend it
+    for _ in range(2 if old else 0):
+        press_point('items', settle=0.3)
+        if use_lit_after(False):
+            old = False
+            break
+    if old:
+        say('  something is still picked in the Inventory: not pressing Use')
+        return False
+    for _ in range(3):
+        if not click_slot(settle):
+            return False
+        if use_lit_after(True, 3.0):
+            return True
+    say('  the slot did not get picked: not pressing Use')
+    return False
+
+
+def uses_dead(say):
+    if USE_DEAD:
+        say('  Roblox is not taking item uses since one was refused: not trying until a rejoin')
+    return USE_DEAD
+
+
+def use_slot(slot, say, settle=0.25, halt=stopped, ours=False):
+    """Pick search result `slot` (0 or 1), set the amount to 1, press Use. True only once the slot shows one fewer."""
+    return use_picked(lambda s: press_point('slot%d' % (slot + 1), settle=s), lambda: slot_look(slot), say, settle, halt,
+                      ours)
+
+
+def use_picked(pick, look, say, settle=0.25, halt=stopped, ours=False):
+    """Pick a slot, set the amount to 1, press Use. True only once look() of that slot changes.
+    ours: our last pick should still be up; it is never picked again (the slot may hold another item now).
+    If the Inventory shuts it is reopened, and the slot is checked before pressing Use again."""
+    global USE_DEAD, USE_GIVE_UPS
+    if uses_dead(say):
+        return False
+    misses = 0
+    for go in range(USE_TRIES):
+        if halt() or not reopened(halt):
+            return False
+        lit = use_lit() or (ours and use_lit_after(True, 3.0))
+        if ours and not lit:
+            if inventory_shown():
+                say('  nothing is picked any more (none left?)')
+                return False
+            continue
+        if ((go == 0 and not ours) or not lit) and not picked(pick, say, settle):     # later, a lit Use is ours
+            if inventory_shown():
+                return False
+            continue                            # it went away mid-pick
+        if not use_one():
+            continue
+        before = steady(look)
+        if before is None or not use_lit():
+            continue
+        if not press_point('use', settle=0.4):
+            return False
+        taken = use_taken(look, before)
+        if taken == 'gone':
+            if _searched in SHUTS_ON_USE:
+                USE_GIVE_UPS = 0
+                return True                     # its window took over, as it does when used
+            seen = looks_used(look, before, halt)
+            if seen is None:
+                seen = looks_used(look, before, halt)       # a cutscene then a closing window
+            taken = {True: 'used', False: 'same', None: 'gone'}[seen]
+            if taken == 'same':
+                say('  the Inventory shut before Use took: pressing it again')
+                continue
+        if taken == 'used':
+            USE_GIVE_UPS = 0                    # Use works: an earlier give-up was lost clicks, not a refusal
+            return True
+        if taken == 'gone':
+            say('  the Inventory shut after Use and would not show again: not pressing again')
+            return False
+        misses += 1
+        if misses >= DEAD_AFTER:
+            USE_GIVE_UPS += 1
+            if USE_GIVE_UPS >= DEAD_GIVE_UPS:
+                USE_DEAD = True
+                say('  Use did nothing %d times, again: Roblox stopped taking item uses (a refused one does that '
+                    'until a rejoin)' % misses)
+            else:
+                say('  Use did nothing %d times: giving up on this one for now' % misses)
+            return False
+        say('  Use did nothing: setting 1 and pressing again')
+    say('  Use did not take after %d tries' % USE_TRIES)
+    return False
 
 
 def click_use(term, say):
@@ -1877,43 +2165,76 @@ def click_use(term, say):
     if slot is None:
         return False
     name = 'slot%d' % (slot + 1)
-    if stopped() or not press_point(name, settle=0.25) or not press_point('use', settle=0.4):
+    if stopped() or not use_slot(slot, say):
         return False
     say('used one %s (%s)' % (term, name))
     return True
 
 
-def search_item(term, say, halt, wait):
-    """Type `term` in the open Inventory's search and return the slot to use, or None.
-    Clearing the search must bring the whole bag back first, so the keys are known to reach the box.
-    A wrong-looking result gets the search typed once more; the answer has to read the same twice."""
-    for go in range(2):
-        if halt() or not press_point('search', settle=0.2):
+def search_item(term, say, halt, wait, tries=SEARCH_TRIES):
+    """Type `term` in the Inventory search and return the slot to use, or None.
+    The box must read empty after clearing and show text after typing, so the keys are known to reach it.
+    A wrong-looking result is typed again; the answer must read the same twice. A shut Inventory restarts it."""
+    global _searched
+    _searched = None
+    if uses_dead(say):
+        return None
+    for go in range(tries):
+        again = ': trying again' if go < tries - 1 else ': not using any'
+        if halt():
             return None
+        if not inventory_shown() and not reopened(halt):
+            say('  %s: the Inventory went away and would not open again' % term)
+            return None
+        if go and not press_point('items', settle=0.3):        # a lost Items click leaves Gears up
+            return None
+        if not press_point('search', settle=0.2):
+            return None
+        if not inventory_shown():
+            continue
         type_term('')
-        wait(0.4)
-        slot, colours = find_item(term)
-        if colours and colours[2] == 'empty':
+        if not until(lambda: not search_typed(), 0.4, 2.0, wait) or not inventory_shown():
             if halt():
                 return None
-            say('  %s: clearing the search did not bring the bag back (%s)%s' % (
-                term, ', '.join(colours), ': trying again' if go == 0 else ': not using any'))
+            say('  %s: clearing the search did not take%s' % (term, again))
             continue
         type_term(term, clear=False)
-        wait(0.6)
-        slot, colours = find_item(term)
-        if slot is not None:
-            wait(0.3)
-            if find_item(term)[0] == slot:      # the grid can still be redrawing
-                return slot
+        if not until(search_typed, 0.6, 3.0, wait):
+            if halt():
+                return None
+            say('  %s: the search box shows no text%s' % (term, again))
+            continue
+        slot, colours = None, []
+        end = time.monotonic() + RESULTS_S * PACE
+        while not halt():
+            slot, colours = find_item(term)
+            if slot is not None:
+                wait(0.3)
+                if find_item(term)[0] == slot:  # the grid can still be redrawing
+                    _searched = term
+                    return slot
+            if time.monotonic() >= end or colours == ['no Inventory']:
+                break
+            wait(0.4)
         if halt():
             return None
         say('  %s: results read as %s%s' % (term, ', '.join(colours) or 'nothing (no slot spots)',
-                                             ': searching again' if go == 0 else ': not using any'))
+                                             again.replace('trying', 'searching')))
     return None
 
 
-OPEN_TRIES = 3           # clicks before giving up on a window
+def until(check, first, most, wait):
+    """Wait `first`, then keep looking until check() holds or `most` seconds have gone."""
+    wait(first)
+    end = time.monotonic() + (most - first) * PACE
+    while not check():
+        if time.monotonic() >= end:
+            return False
+        wait(0.3)
+    return True
+
+
+OPEN_TRIES = 4           # clicks before giving up on a window (a cutscene eats clicks for up to 6 s)
 OPEN_WAIT = 1.5          # extra wait for a slow window
 
 
@@ -1950,8 +2271,8 @@ def window_seen():
 
 
 def open_by_click(name, halted=lambda: False):
-    """Click a side button until its window shows. It's a toggle and cutscenes eat clicks, so blind clicks
-    get out of step. Where windows aren't recognised, one click is trusted."""
+    """Click a side button until its window shows (it's a toggle and cutscenes eat clicks).
+    Where windows aren't recognised, one click is trusted."""
     close_inventory()                                   # close anything already up
     for _ in range(OPEN_TRIES):
         if halted() or not press_point(name, settle=0.4):
@@ -1970,7 +2291,7 @@ def _grab_window():
 
 def name_colour(centre, rgb, pitch):
     """Colour of the item name in a slot: 'grey', 'white', 'gold', 'hue N' or 'empty'.
-    Reads the middle of the slot only (slots are `pitch` apart), clear of the selected slot's blue glow and 'x1'."""
+    Reads the slot's middle, clear of the selection glow and 'x1'."""
     x, y = int(centre[0]), int(centre[1])
     hx, hy = max(2, int(pitch * NAME_W)), max(2, int(pitch * NAME_H))
     crop = rgb[max(0, y - hy):y + hy + 1, max(0, x - hx):x + hx + 1].astype(np.int16)
@@ -1991,21 +2312,64 @@ def name_colour(centre, rgb, pitch):
     return 'gold' if GOLD[0] <= hue <= GOLD[1] else 'hue %d' % hue
 
 
+def has_count(centre, rgb, pitch):
+    """Is there an item in the slot? Its 'xN' count is white, bottom right; an empty slot shows the dimmed world."""
+    x, y = int(centre[0]), int(centre[1])
+    crop = rgb[max(0, y + int(0.12 * pitch)):y + int(0.42 * pitch), max(0, x):x + int(0.42 * pitch)]
+    return int((crop.min(-1) > 215).sum()) >= 4 if crop.size else False
+
+
+def name_rgb(slot):
+    """Colour of the name in search result `slot`: its brightest tinted ink (count and border are white or grey).
+    None if it can't be read."""
+    a, b = point_at('slot1'), point_at('slot2')
+    if a is None or b is None:
+        return None
+    left, top, _, _ = _window_rect()
+    rgb = _grab_window()
+    if sees_windows() and not inventory_open(rgb):
+        return None
+    pitch = math.hypot(b[0] - a[0], b[1] - a[1])
+    x, y = int((a, b)[slot][0] - left), int((a, b)[slot][1] - top)
+    hx, hy = max(2, int(pitch * NAME_W)), max(2, int(pitch * NAME_H))
+    c = rgb[max(0, y - hy):y + hy + 1, max(0, x - hx):x + hx + 1].reshape(-1, 3).astype(int)
+    c = c[c.max(1) - c.min(1) >= 40]
+    if len(c) < 5:
+        return None
+    v = c.max(1)
+    return tuple(np.median(c[v >= np.percentile(v, 80)], 0))
+
+
+def search_typed():
+    """Does the search box show white typed text? The empty placeholder is grey;
+    the caret and the white corner marks at its right end are ignored."""
+    import points
+    rgb = points.grab('inventorySearchContent')
+    if rgb is None:
+        return False
+    w = rgb.shape[1]
+    return int((rgb[:, w // 20:w * 85 // 100].min(-1) > 215).any(0).sum()) > 12
+
+
 def find_item(term):
-    """Which search result is `term` (0 or 1, else None), and what the first three slots read as.
-    A third result means the search didn't take and the list is the whole bag."""
+    """Which search result is `term` (0, 1 or None), and what the first three slots read as.
+    A third result means the search didn't take."""
     a, b = point_at('slot1'), point_at('slot2')
     if a is None or b is None:
         return None, []
     left, top, _, _ = _window_rect()
     rgb = _grab_window()
+    if sees_windows() and not inventory_open(rgb):
+        return None, ['no Inventory']           # a cutscene hides it; the world behind can read as a name
     pitch = math.hypot(b[0] - a[0], b[1] - a[1])
-    colours = [name_colour((x - left, y - top), rgb, pitch) for x, y in (a, b, (2 * b[0] - a[0], 2 * b[1] - a[1]))]
+    spots = [(x - left, y - top) for x, y in (a, b, (2 * b[0] - a[0], 2 * b[1] - a[1]))]
+    colours = [name_colour(s, rgb, pitch) for s in spots]
+    want = NAME_COLOURS.get(term)
+    if want is None:                            # colour unknown: only a lone result is safe; dark names don't read,
+        filled = [has_count(s, rgb, pitch) for s in spots]      # so go by the white 'xN' count
+        return (0 if filled == [True, False, False] else None), colours
     if colours[0] == 'empty' or colours[2] != 'empty':
         return None, colours
-    want = NAME_COLOURS.get(term)
-    if want is None:                            # colour unknown: only a lone result is safe
-        return (0 if colours[1] == 'empty' else None), colours
     if any(c not in (want, 'gold', 'empty') for c in colours):
         return None, colours                    # something else is listed: old results, not this search
     return next((i for i in (0, 1) if colours[i] == want), None), colours

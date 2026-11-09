@@ -1,17 +1,15 @@
-"""Auto fishing, FishSol style: cast, wait for the bite, reel by the bar colour, close the catch, repeat.
-
-Buttons all come from gui_points.json, no calibration needed.
-"""
+"""Auto fishing: cast, wait for the bite, reel by the bar colour, close the catch, repeat."""
 import re
 import time
 
 import numpy as np
 
 import game
+import labels
 import merchant
 import points
 
-# VIP: spawn -> Captain Flarg (ends on E to talk), then shop -> fishing spot
+# VIP: spawn -> Captain Flarg (ends on E), then shop -> fishing spot
 TO_SHOP = [(0.0, 'down', 'w'), (0.7, 'down', 'a'), (5.2, 'up', 'w'), (5.2, 'up', 'a'), (5.3, 'down', 'w'),
            (6.4, 'up', 'w'), (6.7, 'down', 's'), (6.9, 'up', 's'), (7.1, 'down', ' '), (7.125, 'down', 'w'),
            (8.325, 'up', ' '), (8.525, 'up', 'w'), (8.825, 'down', 'e'), (9.125, 'up', 'e')]
@@ -21,15 +19,15 @@ TO_SHOP_FREE = [(0.0, 'down', 'w'), (0.875, 'down', 'a'), (6.725, 'up', 'w'), (6
                 (8.2, 'up', 'w'), (8.5, 'down', 's'), (8.75, 'up', 's'), (8.95, 'down', ' '), (8.975, 'down', 'w'),
                 (10.175, 'up', ' '), (10.725, 'up', 'w'), (11.025, 'down', 'e'), (11.325, 'up', 'e')]
 TO_SPOT_FREE = [(0.0, 'down', 'd'), (2.875, 'up', 'd'), (2.875, 'down', 'w'), (5.075, 'up', 'w')]
-ZOOM_OUT_S = 1.5         # hold O before the first cast, zoomed in you lose the bobber
+ZOOM_OUT_S = 1.5         # hold O before the first cast; zoomed in you lose the bobber
 ZOOM_TOPUP_S = 0.3       # short top-up before later casts
-BITE_WHITE = 200         # lit is 245-255, ~230 over Remote Desktop; resting is under 40
+BITE_WHITE = 200         # lit is 245-255 (~230 over Remote Desktop), resting under 40
 BITE_CAP = 244           # so a tinted bite still counts
 BITE_POLL_S = 0.05       # the spot stays lit for the whole catch
-DRY_CASTS = 2            # Fish doing nothing more times than this = full bag
+DRY_CASTS = 2            # Fish doing nothing this many times = full bag
 REEL_S = 9.0             # a reel never lasts longer
 THIN = 20 / 405          # FishSol's 20 px of a 405 px bar
-RUN_TOL = 20             # zone colour drifts ~15 over bright backgrounds, the fill is ~100 off
+RUN_TOL = 20             # zone colour drifts ~15 on bright backgrounds, the fill is ~100 off
 NO_BITE_S = 30.0        # then the failsafe takes a step
 REEL_MIN_S = 1.0
 BAR_SHOWS_S = 1.5
@@ -37,15 +35,15 @@ GONE_LOOKS = 3          # catch bar missing this many looks in a row = reel over
 CLOSE_WAIT_S = 0.2
 X_SHOWS_S = 2.5          # the X shows ~1.9 s after the reel
 SEE_CAST_S = 2.0
-LOST_RUN = 5            # this many "got away" in a row = we can't see the catch window on this PC
+LOST_RUN = 5            # this many "got away" in a row = the catch window can't be seen
 SEE_CATCH_S = 5.0        # no catch window by then = fish got away
 SEE_SHUT_S = 1.5
 TRIES = 3
 TALK_WAIT_S = 2.0
 SHOP_TRIPS = 3           # tries at reaching Flarg before fishing without selling
 SELL_CLOSE_S = 1.0       # wait after Confirm
-SELL_MAX = 60            # each Sell All clears one kind of fish
-SELL_AHEAD = 0.5         # sell half the guessed kinds left before reading the count again
+SELL_MAX = 100           # each Sell All clears one kind of fish
+SELL_AHEAD = 0.5         # sell half the guessed kinds left before counting again
 SLOW_STEP = 0.15         # extra wait per Sell All when the game drops some
 SLOW_MAX = 0.6
 
@@ -87,7 +85,7 @@ def walk(route, halt):
             game.up(key)
 
 
-RESPAWNED_S = 3.0           # you're back in ~1 s but the game ignores clicks (Collection) a bit longer
+RESPAWNED_S = 3.0           # back in ~1 s, but clicks are ignored a bit longer
 
 
 def respawn(halt):
@@ -110,7 +108,7 @@ def bad_colour(c):
 
 
 def majority(mask):
-    """3x3 majority vote. The bar is see-through so the background speckles it; straight edges survive."""
+    """3x3 majority vote: the see-through bar gets speckled, straight edges survive."""
     h, w = mask.shape
     p = np.pad(mask, 1, mode='edge').astype(np.uint8)
     return sum(p[y:y + h, x:x + w] for y in range(3) for x in range(3)) >= 5
@@ -149,17 +147,18 @@ def cast(halt, zoom=ZOOM_OUT_S, full_check=True):
         game.up('o')
     points.leave_dialogue(tries=2, skip=True)               # a leftover dialogue covers Fish
     for go in range(1, TRIES + 1):
+        if window_state() in ('catch', 'failed'):          # a late catch window sits over Fish
+            fclick('fishingMinigameResultCloseButton')
         if not fclick('fishingMinigameFishButton', 0.1):
             return False
-        st = wait_state(lambda st: st != 'fish', SEE_CAST_S, halt)
-        if st != 'fish':
+        st = wait_state(lambda st: st not in ('fish', 'catch', 'failed'), SEE_CAST_S, halt)
+        if st not in ('fish', 'catch', 'failed'):
             return not halt()                   # cast, already biting, or unreadable: carry on
-        if go == 1 and full_check and bag_full():
+        if go == 1 and st == 'fish' and full_check and bag_full():
             return 'full'
         print('fishing: Fish still showing after the click (go %d of %d)' % (go, TRIES))
-        if bugged:                  # a fish that got away leaves the centred window up and Fish dead; its X fixes it
-            fclick('fishingMinigameResultCloseButton')
-    return not halt()
+        fclick('fishingMinigameResultCloseButton')  # the centred window can leave Fish dead even when not seen as moved
+    return not halt() and 'dead'                    # no cast took: the button is covered or the bag is full
 
 
 def bag_full():
@@ -175,6 +174,9 @@ def bag_full():
         return False
     ys, xs = np.nonzero(red)
     crop = img[max(0, ys.min() - 10):ys.max() + 10, max(0, xs.min() - 10):xs.max() + 10]
+    seen = labels.cannot_fish(crop, cw, ch)             # by its look first, OCR only if unsure
+    if seen is not None:
+        return seen
     try:
         text = ''.join(merchant.read_lines(crop)).lower().replace(' ', '')
     except Exception:
@@ -206,7 +208,7 @@ def bitten(within, halt, idle=0):
             dipped = True
         elif dipped:
             return True
-        if catch_bar_up():          # some sizes only flash the icon, dimmer than the cut-off over Remote Desktop
+        if catch_bar_up():          # some sizes only flash the icon, dimmer over Remote Desktop
             return True
         time.sleep(BITE_POLL_S)
     return False
@@ -226,12 +228,14 @@ def _share(rgb, colour):
     elif colour == 'text':          # white or any bright colour
         hi, lo = a.max(axis=2), a.min(axis=2)
         hit = (lo >= 225) | ((hi >= 180) & (hi - lo >= 90))
+    elif colour == 'dark':
+        hit = a.max(axis=2) <= 120
     else:
         hit = a.min(axis=2) >= 225
     return float(hit.mean())
 
 
-bugged = False      # the game sometimes centres the fishing window, moving its buttons up
+bugged = False      # the fishing window is sometimes centred, moving its buttons up
 
 
 def _shift(on):
@@ -287,14 +291,24 @@ def _button_state(on):
     return None
 
 
-def window_state():
-    """'catch', 'failed' (red Fishing Failed), 'fish' (blue Fish, no line), 'line' (red Exit, cast) or None if unsure.
+def _centred_edge():
+    """The centred window has a white top edge over a dark body; a blue aura or sea has neither."""
+    root = fbox('fishingMinigamePromptWindowRoot', True)
+    if root is None:
+        return False
+    cut = (root[2] - root[0]) // 10
+    rows = game.grab((root[0] + cut, root[1] - 4, root[2] - cut, root[1] + 8))
+    light = (rows.min(axis=2) >= 120).mean(axis=1)
+    return len(light) == 12 and light[:7].max() >= 0.9 and light[7:].max() <= 0.3
 
-    None never clicks anything. Finding the button where the bugged window puts it flips `bugged`.
-    """
+
+def window_state():
+    """'catch', 'failed', 'fish', 'line' or None if unsure. None never clicks.
+    Finding the button where the bugged window puts it flips `bugged`."""
     global bugged
     head, x = points.box('fishingMinigameResultHeaderLabel'), points.box('fishingMinigameResultCloseIcon')
-    if head and x and _share(game.grab(x), 'white') >= 0.03:
+    shot = game.grab(x) if head and x else None             # the X sits on the window's dark body; with no window
+    if shot is not None and _share(shot, 'white') >= 0.03 and _share(shot, 'dark') >= 0.5:   # a white sky is white
         top = game.grab(head)
         if _share(top, 'red') >= 0.05:
             return 'failed'
@@ -302,7 +316,7 @@ def window_state():
             return 'catch'
     for on in (False, True):                      # normal spot first so one odd read can't stick
         st = _button_state(on)
-        if st is not None:
+        if st is not None and (not on or _centred_edge()):
             if on != bugged:
                 bugged = on
                 print('fishing: the window is %s' % ('bugged into the middle of the screen' if on else 'back in place'))
@@ -311,19 +325,21 @@ def window_state():
 
 
 def wait_state(want, seconds, halt):
-    """Wait for a state (or a test on one). Returns the last state seen."""
+    """Wait for a state (or a test on one). Returns the last state seen.
+    None only counts after a few looks in a row."""
     test = want if callable(want) else (lambda st: st == want)
-    end, st = time.perf_counter() + seconds * game.PACE, None
+    end, st, blank = time.perf_counter() + seconds * game.PACE, None, 0
     while time.perf_counter() < end and not halt():
         st = window_state()
-        if test(st):
+        blank = blank + 1 if st is None else 0
+        if test(st) and (st is not None or blank >= 3):
             return st
         time.sleep(0.1)
     return st
 
 
 def catch_bar_up():
-    """Catch bar showing? Its outline is a long straight light line the world never draws. None if unknown."""
+    """Catch bar showing? Its outline is a long straight light line. None if unknown."""
     b = fbox('fishingMinigameCatchBarOuter')
     if b is None:
         return None
@@ -344,7 +360,7 @@ def reel(halt):
         up = catch_bar_up()
     if not up and window_state() == 'line':
         return None                              # no catch bar: a click here hits Exit
-    # FishSol's sample spot: over the success zone at the start, above the timer digits
+    # sample spot: over the success zone at the start, above the timer
     mid = (bar[0] + (bar[2] - bar[0]) * 196 // 405, bar[1] + (bar[3] - bar[1]) * 5 // 21)
     colour = pixel(mid)
     for _ in range(60):
@@ -376,10 +392,8 @@ def reel(halt):
 
 
 def close_catch(halt):
-    """Shut the catch window as soon as its X shows. 'caught', 'lost' (no window came), 'failed' or False if stopped.
-
-    Has to be a proper click (Roblox forward, glide onto it); a jump-and-click sometimes didn't take.
-    """
+    """Shut the catch window once its X shows. 'caught', 'lost', 'failed' or False if stopped.
+    Needs a proper click (Roblox forward, glide onto it)."""
     if not nap(CLOSE_WAIT_S, halt):
         return False
     start, st = time.perf_counter(), None
@@ -439,9 +453,7 @@ _room = None                # bag size from the last full count
 
 def read_count():
     """Fish in the bag from 'Inventory [268 / 360]', or None.
-
-    Small windows can drop the '/' ('268360'), so the last known bag size splits it.
-    """
+    A lost '/' ('268360') is split by the last known bag size."""
     global _room
     img = points.grab('fishingShopSellTab')
     if img is None or img.size == 0:
@@ -489,7 +501,7 @@ def sell(halt, times=1, say=print, every=True):
     done, reads, same, last, batch, per = 0, 1, 0, None, 1, 0
     while count is not None and count > 0 and done < SELL_MAX:
         guess = max(1, int(count / per * SELL_AHEAD)) if per else 2
-        batch = min(SELL_MAX - done, guess, batch * 2)      # stops a 1-fish first kind from guessing 200 kinds left
+        batch = min(SELL_MAX - done, guess, batch * 2)      # stops a 1-fish first kind guessing 200 kinds left
         for _ in range(batch):
             if not sell_all(halt):
                 return False
@@ -503,19 +515,30 @@ def sell(halt, times=1, say=print, every=True):
                 break
             continue
         same, count, per = 0, now, (count - now) / batch
-    # count unreadable: sell until the first slot stops changing
-    while start is None and done < max(1, times):
+    # count unreadable: sell until the first slot stops changing; Sell all = no cap
+    rescued = False
+    while start is None and done < (SELL_MAX if every else max(1, times)):
         if not sell_all(halt):
             return False
         done += 1
         now = first_fish()
         if unchanged(last, now):
-            if not nap(1.0, halt):
+            if not nap(1.0 + 2.0 * same, halt):             # a laggy server answers late: wait longer each time
                 return False
             now = first_fish()                              # slow grid redraw, look again
         same = same + 1 if unchanged(last, now) else 0
-        if same >= 2:
-            break                                           # bag's empty
+        if same >= (3 if every else 2):
+            if not every or rescued:
+                break                                       # bag's empty
+            rescued = True                                  # a late "Sell Confirm" may still be waiting: answer it
+            if not points.click('fishingShopSellConfirmSellButton', 2.0):
+                return False
+            now = first_fish()
+            if unchanged(last, now):
+                break
+            same = 0
+        elif same == 0:
+            rescued = False
         last = now
     if start is not None:
         say('fish in the bag: %d before selling, %d after (%d Sell All, %d reads)' % (start, count, done, reads))
@@ -561,21 +584,23 @@ class Fisher:
         done = cast(halt, zoom, self.full_check)
         if done == 'full':
             return self.full_bag()
-        self.after_sell = False
+        if done == 'dead':
+            return self.full_bag('Fish does nothing')    # a stale catch window covers it until a rejoin
+        self.after_sell = self.rejoin = False
         ok = done and nap(0.5, halt)
         self.zoomed = self.zoomed or bool(ok)
         self.line_out = bool(ok)
         self.cast_at, self.idle, peak, dipped = time.monotonic(), icon_level(), 0, False
         return ok
 
-    def full_bag(self):
-        """Sell, or rejoin if it's still full on the first cast after selling."""
+    def full_bag(self, what='inventory full'):
+        """Sell, or rejoin if it's still like this on the first cast after selling."""
         self.line_out = self.at_spot = False
         if self.after_sell:
-            self.failsafe('inventory still full right after selling: rejoining')
-            self.rejoin = True
+            self.rejoin = '%s right after selling' % what
+            self.failsafe('%s: rejoining' % self.rejoin)
         else:
-            self.failsafe('inventory full: selling')
+            self.failsafe('%s: selling' % what)
         self.since_sell = 0
         return True
 
@@ -583,6 +608,7 @@ class Fisher:
         self.say(what)
         if self.report:
             self.report(what[:1].upper() + what[1:])
+        points.click('fishingShopCloseButton', 0.2)          # a leftover Fishing Shop covers everything else
 
     def lost(self):
         """We got moved (rejoin, merchant teleport): walk back before casting."""
@@ -590,7 +616,7 @@ class Fisher:
         self.hold = False
 
     def reel_in(self, halt):
-        """Press Exit, but only if it's showing (same spot is Fish otherwise and would cast)."""
+        """Press Exit, only if it's showing (the same spot is Fish otherwise)."""
         if window_state() == 'line':
             fclick('fishingMinigameFishButton', 0.2)
         self.line_out = False
@@ -692,6 +718,13 @@ class Fisher:
         if st == 'failed':
             fclick('fishingMinigameResultCloseButton', 0.1)
             return self.foiled(halt, 'before it was reeled')
+        if st == 'catch':                       # the catch window came after close_catch gave up on it
+            fclick('fishingMinigameResultCloseButton', 0.1)
+            self.caught += 1
+            self.since_sell += 1
+            self.say('fish %d caught (its window came late): shut it, casting again' % self.caught)
+            self.line_out = False
+            return True if self.pause or self.hold else self.cast(halt)
         if st == 'fish' and nap(0.3, halt) and window_state() == 'fish':
             if self.pause or self.hold:
                 self.line_out = False

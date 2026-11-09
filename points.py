@@ -22,7 +22,13 @@ NAMES = {(2560, 1440): '1440p fullscreen', (2560, 1369): '1440p windowed', (1920
          (1920, 1009): '1080p windowed', (1366, 768): '768p fullscreen', (1366, 697): '768p windowed'}
 
 
-WINDOWS = ('auraStorage', 'inventory')     # buttons inside the centred Inventory / Aura Storage window
+WINDOWS = ('auraStorage', 'inventory', 'dailyRewards')     # buttons inside a centred window sized by width
+TOPBAR = 58                                                 # Roblox top-bar height, not scaled with the window
+FRAMES = {      # windows with a fixed shape, (left, top, width) on a w x h client
+    'merchantShop': lambda w, h: (0.95 * w - min(w / 2, h * 1.15), h / 2 - min(w / 2, h * 1.15) / 4.6,
+                                  min(w / 2, h * 1.15)),
+    'dialogue': lambda w, h: (w / 2 - min(w / 2, h * 0.27 * 3.031) / 2, 0.625 * h, min(w / 2, h * 0.27 * 3.031)),
+}
 
 
 def sizes():
@@ -47,8 +53,16 @@ def _bar_box(name, ow, oh):
     bw = _lerp(ws, [r[4] for r in rows], ow)
     bh = _lerp(ws, [r[5] for r in rows], ow)
     cx = ow / 2 + _lerp(ws, [l + a / 2 - w / 2 for w, h, l, t, a, b in rows], ow)
-    cy = oh * _lerp(ws, [(t + b / 2) / h for w, h, l, t, a, b in rows], ow)
+    cy = 0.797 * oh - _lerp(ws, [0.797 * h - t - b / 2 for w, h, l, t, a, b in rows], ow)   # bottom sits at 0.797 of the height
     return cx - bw / 2, cy - bh / 2, bw, bh
+
+
+def _result_box(name, ow, oh, size):
+    """The catch window at an unstored size: centred and not a plain stretch."""
+    width = lambda w, h: min(0.185 * w + 250, 0.8 * (0.185 * h + 250))
+    l, t, bw, bh = _sizes()[size][name]
+    k = width(ow, oh) / width(*size)
+    return ow / 2 + (l - size[0] / 2) * k, oh / 2 + (t - size[1] / 2) * k, bw * k, bh * k
 
 
 def box(name):
@@ -64,14 +78,25 @@ def box(name):
     size = own if own in _sizes() else _nearest(*own)
     l, t, bw, bh = _sizes()[size][name]
     if name.startswith(WINDOWS) and own not in _sizes():
-        # that window is half the client wide, keeps its shape and stays centred, so width alone sets the scale
+        # that window is half the client wide and keeps its shape, so width sets the scale
         s = cw / size[0]
         y = lambda v: y0 + ch / 2 + (v - size[1] / 2) * s
         return round(x0 + l * s), round(y(t)), round(x0 + (l + bw) * s), round(y(t + bh))
-    if name.startswith('fishingMinigame') and 'Result' not in name and own not in _sizes():
-        l, t, bw, bh = _bar_box(name, *own)
+    frame = next((f for k, f in FRAMES.items() if name.startswith(k)), None)
+    if frame and own not in _sizes():
+        (fl, ft, fw), (ol, ot, ow) = frame(*size), frame(cw, ch)
+        k = ow / fw
+        return (round(x0 + ol + (l - fl) * k), round(y0 + ot + (t - ft) * k),
+                round(x0 + ol + (l + bw - fl) * k), round(y0 + ot + (t + bh - ft) * k))
+    if name.startswith('fishingMinigame') and own not in _sizes():
+        l, t, bw, bh = (_result_box(name, *own, size) if 'Result' in name else _bar_box(name, *own))
         size = own
     sx, sy = cw / size[0], ch / size[1]
+    if name.startswith('collection') and own not in _sizes():
+        # Collection sits below the top bar, which keeps its height
+        bar = TOPBAR * s
+        y = lambda v: round(y0 + bar + (v - TOPBAR) * (ch - bar) / (size[1] - TOPBAR))
+        return round(x0 + l * sx), y(t), round(x0 + (l + bw) * sx), y(t + bh)
     return (round(x0 + l * sx), round(y0 + t * sy), round(x0 + (l + bw) * sx), round(y0 + (t + bh) * sy))
 
 
@@ -110,7 +135,7 @@ def choice(colour):
     mask = (main >= 120) & (main > a + 40) & (main > c + 40)
     if mask.sum() < 30:
         return None
-    # biggest patch only, so an aura glowing at the feet doesn't drag the point off the button
+    # biggest patch only, so an aura glow doesn't drag the point off
     patches = game._group(mask, (b[0], b[1]), 6, 12, 30)
     return (int(patches[0][0]), int(patches[0][1])) if patches else None
 
@@ -122,9 +147,7 @@ def dialogue_up():
 
 def leave_dialogue(tries=3, gap=0.3, skip=False):
     """Press Leave until the dialogue's gone. True if there was one.
-
-    A shop on top can eat the click. `skip` clicks "Click to skip" first; only use it with no shop open.
-    """
+    `skip` clicks "Click to skip" first; only use it with no shop open."""
     pressed = False
     for n in range(tries):
         at = choice('red')

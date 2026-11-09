@@ -48,6 +48,8 @@ try:
     import merchant as shop  # noqa: E402
     import clipper  # noqa: E402
     import equip  # noqa: E402
+    import selector  # noqa: E402
+    import potions  # noqa: E402
     import merchant_cache  # noqa: E402
 except Exception as e:          # numpy's DLLs raise OSError, not ImportError
     why = str(e).strip().splitlines()[-1] if str(e).strip() else type(e).__name__
@@ -76,13 +78,23 @@ SMALL_BUTTON = dict(bg=SUNK, fg=TEXT, activebackground=SUNK, activeforeground=AC
                     highlightthickness=1, highlightbackground=EDGE)
 
 TITLE = 'MMacro'
-VERSION = '1.0.5'
+VERSION = '1.1.0'
 RELEASE_PAGE = 'https://github.com/ManasAarohi1/MMacro/releases/latest'
 RELEASES = os.environ.get('MMACRO_UPDATE_URL') or 'https://api.github.com/repos/ManasAarohi1/MMacro/releases/latest'
 INVITE = 'https://discord.gg/oppression'
 ITEM_EVERY_S = {game.SC: 20 * 60, game.BR: 35 * 60}    # SC lasts 20 min, BR 35
 ITEM_RETRY_S = 5 * 60                   # retry a failed one after this
 ITEM_SPARE_S = 15                       # past the cooldown, so a use never lands just before it ends
+RUNE = 'cursed rune fragment'
+RUNE_BIOMES = ('PUMPKIN MOON', 'GRAVEYARD')
+RUNE_TRIES, RUNE_RETRY_S = 2, 60        # a missed use is tried once more a minute later, if the biome lasts
+SELECTOR_RETRY_S = 5 * 60               # after an unstable biome
+POP_BIOMES = ('GLITCHED', 'DREAMSPACE', 'CYBERSPACE')     # Auto pop's default biomes
+HOLD_BIOMES = ('GLITCHED', 'DREAMSPACE', 'CYBERSPACE', 'THE RADIANT FOREST', 'SINGULARITY', 'BLOOD RAIN',
+               'GRAVEYARD', 'PUMPKIN MOON')                # no SC, BR or Biome Selector until these end
+SELECTOR_REFUSED_S = 11 * 60            # 3 refusals then span more than the server's 20 min cooldown
+SELECTOR_REFUSALS = 3                   # refused this often in a row: most likely out of that Drive
+SELECTOR_MISSES = 3                     # no Selector or no Drive seen this often in a row: say so once
 REJOIN_WAITS = (15, 30, 60)             # last one repeats
 IN_GAME_S = 150                         # after a rejoin, time to really be in game
 OUT_S = 180                             # Roblox up but not in game this long = disconnect
@@ -102,8 +114,9 @@ EQUIP_RETRY_S = 5 * 60                  # retry a failed equip after this
 JOIN_NONE_S = 300                       # 'nothing equipped' right after a join = title screen
 EQUIP_GAP_S = 90                        # Aura Storage at most this often (auto roll swaps fast)
 MERCHANT_STALE_S = 150                  # merchants stay ~3 min
-MERCHANT_CATCH_S = 90                   # max wait for the fish on the line
+STRAY_EVERY_S = 20                      # look for a window left open (a cutscene hid it while it was closed)
 MERCHANT_REPEAT_S = 600                 # one post per visit (the animation replays)
+MERCHANT_TRIES = 3                      # a shop that didn't open is tried again while the merchant is still there
 
 LOG_MAX = 4 << 20                       # trim logs.txt past this
 
@@ -163,7 +176,7 @@ def clip_floor(text):
     """'from 1 in' as a number; junk means 1 in a billion, never every roll."""
     try:
         return max(1, int(float(re.sub(r'[,\s_]', '', text or ''))))
-    except ValueError:
+    except (ValueError, OverflowError):
         return 1_000_000_000
 
 
@@ -225,10 +238,19 @@ CLIP_COLOURS = ((10 ** 10, 0xFFC94D), (10 ** 9, 0xB38CFF), (10 ** 8, 0x58B9FF), 
 MERCHANT_COLOURS = {'Rin': 0xFF8C00, 'Mari': 0xFFD700, 'Jester': 0x9B59B6, 'Boss': 0x6A0DAD}
 
 
-def biome_colour(name):
+def base_biome(name):
     """Event biomes may come as '(Event) Graveyard'."""
-    name = re.sub(r'^\W*EVENT\W*', '', (name or '').upper()).strip()
-    return BIOME_COLOURS.get(name, EMBED_BIOME)
+    return re.sub(r'^\W*EVENT\W*', '', (name or '').upper()).strip()
+
+
+def biome_colour(name):
+    return BIOME_COLOURS.get(base_biome(name), EMBED_BIOME)
+
+
+def rune_biome(name, picked):
+    """The picked biome `name` is, or None."""
+    squashed = base_biome(name).replace(' ', '')
+    return next((b for b in picked if b.replace(' ', '') == squashed), None)
 
 
 def is_rare(name):
@@ -322,7 +344,7 @@ def server_field(link):
 
 def post_event(webhook_url, title, description='', colour=EMBED_INFO, area='Macro', fields=(), ping='', shot=None,
                footer=True):
-    """Posts one embed. `ping` is the message text (mentions only), `shot` a PNG under it."""
+    """Posts one embed. `ping` = mentions text, `shot` = PNG under it."""
     if not webhook_url:
         return
     embed = {'author': {'name': 'MMacro · %s' % area, 'url': INVITE}, 'title': title[:256], 'color': colour,
@@ -602,7 +624,7 @@ class Calibrate(tk.Toplevel):
         self.only = points is not None          # only these buttons (Play, Contract)
         sections = [(None, points)] if points else [
             ('Items (Auto SC + BR)', game.POINTS), ('Fishing', game.FISH_POINTS),
-            ('Merchant collection', game.MERCHANT_POINTS), ('Daily rewards (optional)', game.DAILY_POINTS)]
+            ('Merchant collection', game.MERCHANT_POINTS), ('Daily rewards', game.DAILY_POINTS)]
         self.points = [p for _, group in sections for p in group]
         self.capturing = None
         self.banner = None
@@ -617,8 +639,7 @@ class Calibrate(tk.Toplevel):
         head = tk.Frame(self, bg=BG)
         head.pack(fill='x', padx=22, pady=(20, 12))
         tk.Label(head, text='Buttons', bg=BG, fg=TEXT, font=(UIB, 14)).pack(anchor='w')
-        tk.Label(head, text='Every button works out of the box (auto). Only if a click misses: Test shows where it '
-                 'clicks, Set lets you click the right spot in Roblox.',
+        tk.Label(head, text='Only use Set if a click misses',
                  bg=BG, fg=DIM, font=(UI, 9), wraplength=400, justify='left', anchor='w').pack(fill='x', pady=(4, 0))
 
         bar = tk.Frame(self, bg=BG)
@@ -702,8 +723,7 @@ class Calibrate(tk.Toplevel):
             n = sum(1 for name in names if name in stored)
             summary.configure(text='%d set' % n if n else 'all auto' if all(x in game.BUILT_IN for x in names)
                               else 'not set', fg=GOOD if n else DIM)
-        optional = set() if self.only else {n for n, _ in game.DAILY_POINTS}
-        left = [n for n, _ in self.points if n not in stored and n not in optional and n not in game.BUILT_IN]
+        left = [n for n, _ in self.points if n not in stored and n not in game.BUILT_IN]
         self.done_b.configure(text='Done' if not left else 'Done  (%d still to set)' % len(left))
 
     def capture(self, name):
@@ -840,9 +860,14 @@ class App:
         self.need_rejoin = None
         self.start_again = False
         self.item_due = {}
+        self.told_dead = False          # said once that Roblox stopped taking item uses
         self._toast = None
         self._key_stop = False          # F2 stopped it: say 'stopped' once done
         self.played = False             # Play pressed in a run: claim daily rewards once back in
+        self.rune_biomes, self.rune_wait, self.rune_due, self.rune_tries = set(), 0, None, 0
+        self.selector_biome, self.selector_due, self.selector_refused, self.selector_missed = None, None, 0, 0
+        self.pop_biomes, self.pop_due, self.pop_list = set(), None, {}
+        self.pop_left = None                # (biome, {potion: amount}) still to use after an interrupted pop
         self.rejoining = False
         self.watch = None
         self.merchant_detect = False
@@ -892,9 +917,11 @@ class App:
         root.report_callback_exception = self._oops
 
         self._header()
-        self.pages = {k: tk.Frame(self.body, bg=BG) for k in ('macro', 'fishing', 'merchant', 'eden', 'credits')}
+        self.pages = {k: tk.Frame(self.body, bg=BG) for k in ('macro', 'items', 'fishing', 'merchant', 'eden', 'credits')}
         self._settings_card(self.pages['macro'])
         self._biome_card(self.pages['macro'])
+        self._items_card(self.pages['items'])
+        self._pop_card(self.pages['items'])
         self._fishing_card(self.pages['fishing'])
         self._merchant_card(self.pages['merchant'])
         self._eden_card(self.pages['eden'])
@@ -951,9 +978,9 @@ class App:
         bar.pack(fill='x', padx=16, pady=(12, 0))
         self.tab = tk.StringVar(value='macro')
         tk.Label(bar, text=TITLE, bg=BG, fg=TEXT, font=(UIB, 18)).pack(anchor='w')
-        tk.Label(bar, text='Biome alerts, auto reconnect, fishing, merchants and Eden.', bg=BG, fg=DIM,
+        tk.Label(bar, text='Biome alerts and automation for Sol\'s RNG', bg=BG, fg=DIM,
                  font=(UI, 9)).pack(anchor='w', pady=(3, 0))
-        Switch(bar, self.tab, (('macro', 'Macro'), ('fishing', 'Fishing'), ('merchant', 'Merchant'), ('eden', 'Eden'),
+        Switch(bar, self.tab, (('macro', 'Macro'), ('items', 'Items'), ('fishing', 'Fishing'), ('merchant', 'Merchant'), ('eden', 'Eden'),
                              ('credits', 'Credits')),
                bg=BG).pack(anchor='w', pady=(10, 0))
 
@@ -963,24 +990,78 @@ class App:
         self.pages[self.tab.get()].pack(fill='x', before=self.button_bar)
         self.root.after_idle(self._fit_window)
 
+    def _when(self, parent, var, **pack):
+        """A frame shown only while `var` is on."""
+        slot = tk.Frame(parent, bg=PANEL, height=1)
+        slot.pack(fill='x', **pack)
+        opts = tk.Frame(slot, bg=PANEL)
+
+        def show(*_):
+            if var.get():
+                opts.pack(fill='x')
+            else:
+                opts.pack_forget()
+                slot.configure(height=1)        # an emptied frame keeps its old size otherwise
+            self.root.after_idle(self._fit_window)
+        var.trace_add('write', show)
+        show()
+        return opts
+
+    def _items_card(self, parent):
+        box = card(parent, fill='x', padx=16, pady=10)
+        self.auto_items = self._toggle(box, 'Auto SC + BR', 'Uses one of each as it runs out', 'auto_items')
+        rule(box)
+        self.rune_on = self._toggle(box, 'Auto Cursed Rune Fragment', 'Uses one once a picked biome has run this long',
+                                    'rune_on')
+        opts = self._when(box, self.rune_on, pady=(0, 6))
+        row = tk.Frame(opts, bg=PANEL)
+        row.pack(fill='x', padx=18, pady=(0, 0))
+        tk.Label(row, text='In', bg=PANEL, fg=TEXT, font=(UIB, 10)).pack(side='left')
+        picked = self.cfg.get('rune_biomes', list(RUNE_BIOMES))
+        picked = picked if isinstance(picked, list) else list(RUNE_BIOMES)
+        self.rune_in = {}
+        for name in reversed(RUNE_BIOMES):
+            var = tk.BooleanVar(value=name in picked)
+            tk.Label(row, text=pretty(name), bg=PANEL, fg=TEXT, font=(UI, 9)).pack(side='right', padx=(4, 10))
+            Check(row, var, side=16).pack(side='right')
+            var.trace_add('write', lambda *_: self._autosave_later())
+            self.rune_in[name] = var
+        self.rune_after = self._field(opts, 'Use after', str(self.cfg.get('rune_after', 0)), 'Seconds into the biome')
+        rule(box)
+        self.selector_on = self._toggle(box, 'Auto Biome Selector', 'Every hour',
+                                        'selector_on')
+        opts = self._when(box, self.selector_on, pady=(0, 10))
+        row = tk.Frame(opts, bg=PANEL)
+        row.pack(fill='x', padx=18)
+        tk.Label(row, text='Biome', bg=PANEL, fg=TEXT, font=(UIB, 10)).pack(side='left')
+        picked = self.cfg.get('selector_biome')
+        self.selector_pick = tk.StringVar(value=picked if picked in selector.DRIVES else 'HEAVEN')
+        pick = tk.Button(row, padx=10, **SMALL_BUTTON)
+        pick.configure(command=lambda: self._selector_menu(pick))
+        pick.pack(side='right')
+        shown = lambda *_: pick.configure(text='%s  ▾' % pretty(self.selector_pick.get()))
+        self.selector_pick.trace_add('write', shown)
+        shown()
+
+    def _selector_menu(self, button):
+        if getattr(self, '_menu', None) is not None:
+            self._menu.destroy()
+        menu = self._menu = tk.Menu(self.root, tearoff=0, bg=SUNK, fg=TEXT, activebackground=ACCENT, activeforeground=BG,
+                                    selectcolor=ACCENT, font=(UI, 9), relief='flat', borderwidth=0)
+        for name in selector.DRIVES:
+            menu.add_radiobutton(label='%s   %s' % (pretty(name), selector.DRIVES[name]), value=name,
+                                 variable=self.selector_pick)
+        menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+
     def _settings_card(self, parent):
         box = card(parent, fill='x', padx=16, pady=10)
-        self.auto_items = self._toggle(box, 'Auto SC + BR', 'use a Strange Controller and a Biome Randomizer as each '
-                                       'runs out', 'auto_items')
-        rule(box)
-        self.anti_afk = self._toggle(box, 'Anti-AFK', 'jump twice every 5 minutes so Roblox does not kick for idling',
-                                     'anti_afk')
-        rule(box)
-        self.merchant_on = self._toggle(box, 'Merchant detection', 'Detects Mari, Jester, Rin and the boss through '
-                                        'Roblox\'s cache', 'merchant_on')
-        self.block_on = bool(self.merchant_on.get())
-        self.merchant_on.trace_add('write', self._merchant_toggled)
+        self.anti_afk = self._toggle(box, 'Anti-AFK', 'Jumps every 5 minutes so you don\'t get kicked', 'anti_afk')
         rule(box)
         self.clip_on = tk.BooleanVar(value=bool(self.cfg.get('clip_on')))
-        row, text = self._row(box, 'Clip rare auras', 'saves the %d s before and %d s after one is rolled'
-                              % (clipper.BEFORE_S, clipper.AFTER_S), lambda r: Check(r, self.clip_on))
+        row, text = self._row(box, 'Clip rare auras', 'Saves a clip when you roll one', lambda r: Check(r, self.clip_on))
         tk.Button(row, text='Clips', command=self._open_clips, padx=12, **SMALL_BUTTON).pack(side='right', padx=(12, 0),
                                                                                          before=text)
+        text = self._when(text, self.clip_on)
         line = tk.Frame(text, bg=PANEL)
         line.pack(fill='x', pady=(4, 0))
         tk.Label(line, text='from 1 in', bg=PANEL, fg=DIM, font=(UI, 8)).pack(side='left')
@@ -995,18 +1076,18 @@ class App:
         keys.pack(fill='x', pady=(4, 0))
         self.clip_key_on = tk.BooleanVar(value=bool(self.cfg.get('clip_key_on')))
         Check(keys, self.clip_key_on, side=14).pack(side='left')
-        tk.Label(keys, text='use my recorder, key', bg=PANEL, fg=DIM, font=(UI, 8)).pack(side='left', padx=(6, 0))
+        tk.Label(keys, text='use my recorder', bg=PANEL, fg=DIM, font=(UI, 8)).pack(side='left', padx=(6, 0))
         self.clip_keys = tk.StringVar(value=self.cfg.get('clip_keys') or 'Win+Alt+G')
         self.clip_key_button = tk.Button(keys, textvariable=self.clip_keys, command=self._set_clip_keys, padx=8,
                                          **dict(SMALL_BUTTON, font=('Consolas', 9), pady=1))
         self.clip_key_button.pack(side='left', padx=(6, 0))
-        tk.Label(text, text='Game Bar, Medal...: click it, then press your clip key', bg=PANEL, fg=DIM,
+        tk.Label(text, text='Click the key box then press your clip key', bg=PANEL, fg=DIM,
                  font=(UI, 8), anchor='w').pack(fill='x', pady=(2, 0))
         rule(box)
         self.equip_on = tk.BooleanVar(value=bool(self.cfg.get('equip_on')))
-        row, text = self._row(box, 'Keep an aura equipped', 'after any roll, puts this aura back on',
+        row, text = self._row(box, 'Keep an aura equipped', 'Puts it back on after every roll',
                               lambda r: Check(r, self.equip_on))
-        line = tk.Frame(text, bg=PANEL)
+        line = tk.Frame(self._when(text, self.equip_on), bg=PANEL)
         line.pack(fill='x', pady=(4, 0))
         self.equip_name = tk.StringVar(value=self.cfg.get('equip_aura', ''))
         name_box = entry(line, self.equip_name, width=24, font=(UI, 9))
@@ -1017,33 +1098,137 @@ class App:
         name_box.bind('<Return>', lambda e: self._correct_aura())
         self._correct_aura(quiet=True)
         rule(box)
-        self._row(box, 'Buttons', 'found from your Roblox window size; calibrate only if a click misses',
+        self._row(box, 'Buttons', 'Only needed if a click misses',
                   lambda r: tk.Button(r, text='Calibrator', command=self.calibrate, padx=12, **SMALL_BUTTON))
         rule(box)
         self.auto_reconnect = tk.BooleanVar(value=bool(self.cfg.get('auto_reconnect')))
-        row, text = self._row(box, 'Auto reconnect', 'rejoin the private server after a disconnect; Play is clicked '
-                           '%d s after it opens (Set Play only if it misses)' % game.PLAY_AFTER_S,
-                           lambda r: Check(r, self.auto_reconnect))
+        row, text = self._row(box, 'Auto reconnect', 'Rejoins your private server after a disconnect',
+                              lambda r: Check(r, self.auto_reconnect))
         tk.Button(row, text='Set Play', command=lambda: self.calibrate(game.PLAY_POINT), padx=12,
                   **SMALL_BUTTON).pack(side='right', padx=(12, 0), before=text)
         rule(box)
-        self.rejoin_browser = self._toggle(box, 'Rejoin through browser', 'for PCs where the Roblox link does not open '
-                                           'the game: the private server opens in your browser instead', 'rejoin_browser')
+        self.rejoin_browser = self._toggle(box, 'Rejoin through browser', 'Use this if the Roblox link won\'t open the game',
+                                           'rejoin_browser')
         rule(box)
-        self.low_end = self._toggle(box, 'Potato PC', 'slower menus and clicks for PCs that lag', 'low_end')
+        self.low_end = self._toggle(box, 'Potato PC', 'Slower clicks for laggy PCs', 'low_end')
+
+    def _pop_card(self, parent):
+        box = card(parent, fill='x', padx=16, pady=(0, 10))
+        self.pop_on = self._toggle(box, 'Auto pop', 'Uses potions when a biome starts', 'pop_on')
+        box = self._when(box, self.pop_on)
+        self.pop_sets = {}                              # biome: {potion: amount text}
+        saved = self.cfg.get('pop_items')
+        saved = saved if isinstance(saved, dict) else {}
+        if saved and all(not isinstance(v, dict) for v in saved.values()):     # one list for every picked biome
+            old = self.cfg.get('pop_biomes', list(POP_BIOMES))
+            saved = {b: dict(saved) for b in (old if isinstance(old, list) else POP_BIOMES)}
+        for biome, items in saved.items():
+            if biome in BIOME_COLOURS and isinstance(items, dict):
+                self.pop_sets[biome] = {n: str(a) for n, a in items.items() if n in potions.POTIONS}
+        self.pop_box = tk.Frame(box, bg=PANEL)
+        self.pop_box.pack(fill='x', padx=12)
+        self.pop_frames = {}                            # biome: (frame, {potion: row})
+        for biome in self.pop_sets:
+            self._pop_biome(biome)
+        add = tk.Button(box, text='Add biome \u25be', padx=10, **SMALL_BUTTON)
+        add.configure(command=lambda: self._pop_biome_menu(add))
+        add.pack(anchor='w', padx=18, pady=(4, 10))
+
+    def _pop_biome(self, biome):
+        frame = tk.Frame(self.pop_box, bg=PANEL)
+        frame.pack(fill='x', pady=(6, 2))
+        top = tk.Frame(frame, bg=PANEL)
+        top.pack(fill='x', padx=6)
+        tk.Label(top, text=pretty(biome), bg=PANEL, fg=TEXT, font=(UIB, 9)).pack(side='left')
+        tk.Button(top, text='\u2715', command=lambda: self._drop_pop_biome(biome), padx=6, **SMALL_BUTTON).pack(
+            side='right')
+        pick = tk.Button(top, text='Add potion \u25be', padx=10, **SMALL_BUTTON)
+        pick.configure(command=lambda: self._pop_menu(biome, pick))
+        pick.pack(side='right', padx=(0, 6))
+        self.pop_frames[biome] = (frame, {})
+        for name in self.pop_sets[biome]:
+            self._pop_row(biome, name)
+        self.root.after_idle(self._fit_window)
+
+    def _pop_biome_menu(self, button):
+        if getattr(self, '_menu', None) is not None:
+            self._menu.destroy()
+        menu = self._menu = tk.Menu(self.root, tearoff=0, bg=SUNK, fg=TEXT, activebackground=ACCENT, activeforeground=BG,
+                                    font=(UI, 9), relief='flat', borderwidth=0)
+        for biome in (n for n in BIOME_COLOURS if n != 'NORMAL' and n not in self.pop_frames):
+            menu.add_command(label=pretty(biome), command=lambda b=biome: self._add_pop_biome(b))
+        menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+
+    def _add_pop_biome(self, biome):
+        self.pop_sets.setdefault(biome, {})
+        self._pop_biome(biome)
+        self._autosave_later()
+
+    def _drop_pop_biome(self, biome):
+        self.pop_sets.pop(biome, None)
+        self.pop_frames.pop(biome)[0].destroy()
+        if not self.pop_frames:
+            self.pop_box.configure(height=1)        # Tk keeps an emptied frame's old size
+        self._autosave_later()
+        self.root.after_idle(self._fit_window)
+
+    def _pop_row(self, biome, name):
+        amount = tk.StringVar(value=self.pop_sets[biome][name])
+        row = tk.Frame(self.pop_frames[biome][0], bg=PANEL)
+        row.pack(fill='x', pady=1)
+        tk.Label(row, text=name, bg=PANEL, fg=ACCENT, font=(UI, 9), anchor='w').pack(side='left', padx=(18, 0))
+        tk.Button(row, text='\u2715', command=lambda: self._drop_pop(biome, name), padx=6, **SMALL_BUTTON).pack(
+            side='right', padx=(6, 6))
+        entry(row, amount, width=5, justify='center', font=('Consolas', 9)).pack(side='right', ipady=2)
+        tk.Label(row, text='Amount', bg=PANEL, fg=DIM, font=(UI, 8)).pack(side='right', padx=(0, 6))
+
+        def edited(*_):
+            self.pop_sets[biome][name] = amount.get()
+            self._autosave_later()
+        amount.trace_add('write', edited)
+        self.pop_frames[biome][1][name] = row
+
+    def _pop_menu(self, biome, button):
+        if getattr(self, '_menu', None) is not None:
+            self._menu.destroy()
+        menu = self._menu = tk.Menu(self.root, tearoff=0, bg=SUNK, fg=TEXT, activebackground=ACCENT, activeforeground=BG,
+                                    font=(UI, 9), relief='flat', borderwidth=0)
+        for name in potions.POTIONS:
+            if name not in self.pop_sets[biome]:
+                menu.add_command(label=name, command=lambda n=name: self._add_pop(biome, n))
+        menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+
+    def _add_pop(self, biome, name):
+        self.pop_sets[biome][name] = '1'
+        self._pop_row(biome, name)
+        self._autosave_later()
+        self.root.after_idle(self._fit_window)
+
+    def _drop_pop(self, biome, name):
+        self.pop_sets[biome].pop(name, None)
+        self.pop_frames[biome][1].pop(name).destroy()
+        self._autosave_later()
+        self.root.after_idle(self._fit_window)
+
+    def pop_items(self):
+        """{biome: {potion: amount}} for biomes with potions, in list order; blank or bad amounts count as 1."""
+        out = {}
+        for biome, items in self.pop_sets.items():
+            got = {n: int(a) if a.strip().isdecimal() and int(a) > 0 else 1 for n, a in items.items()}
+            if got:
+                out[biome] = got
+        return out
 
     def _eden_card(self, parent):
         box = card(parent, fill='x', padx=16, pady=10)
-        self.eden_on = self._toggle(box, 'Eden detector', 'watch the screen for Eden while the macro runs, and post '
-                                    'it to the Discord webhook on the Macro tab', 'eden_on')
+        self.eden_on = self._toggle(box, 'Eden detector', 'Pings your webhook when Eden shows up', 'eden_on')
         rule(box)
         self.eden_path = tk.BooleanVar(value=bool(self.cfg.get('eden_path')))
         row, text = self._row(box, 'Walk to Eden', '', lambda r: Check(r, self.eden_path))
         tk.Button(row, text='Set Contract', command=lambda: self.calibrate(eden.POINTS), padx=12,
                   **SMALL_BUTTON).pack(side='right', padx=(12, 0), before=text)
         rule(box)
-        self.eden_record = self._toggle(box, 'Record Eden', '60 s video of Roblox once Eden shows, saved in '
-                                        '%LOCALAPPDATA%\\MMacro', 'eden_record')
+        self.eden_record = self._toggle(box, 'Record Eden', 'Saves a 60 second clip of Eden', 'eden_record')
         rule(box)
         tk.Label(box, text='ID', bg=PANEL, fg=TEXT, font=(UIB, 10), anchor='w').pack(fill='x', padx=18, pady=(10, 3))
         self.eden_ping = tk.StringVar(value=self.cfg.get('eden_ping', ''))
@@ -1092,23 +1277,20 @@ class App:
 
     def _fishing_card(self, parent):
         box = card(parent, fill='x', padx=16, pady=10)
-        self.fish_on = self._toggle(box, 'Auto fishing', 'walks to the ocean, selling at Captain Flarg on the way, '
-                                    'and fishes', 'fish_on')
+        self.fish_on = self._toggle(box, 'Auto fishing', 'Walks to the ocean and fishes', 'fish_on')
         rule(box)
-        self.fish_vip = self._toggle(box, 'VIP', 'untick if you do not own VIP', 'fish_vip')
+        self.fish_vip = self._toggle(box, 'VIP', 'Untick if you don\'t own VIP', 'fish_vip')
         rule(box)
         self.fish_sell = self._field(box, 'Sell every', str(self.cfg.get('fish_sell', 0)),
-                                     'fish caught, then go back to sell (0 = off)')
+                                     'Fish caught before selling and 0 turns it off')
         rule(box)
-        self.fish_sell_all = self._toggle(box, 'Sell all', 'reads the fish count and sells until it is 0; untick '
-                                          'to use Sell amount', 'fish_sell_all')
+        self.fish_sell_all = self._toggle(box, 'Sell all', 'Sells every fish in your bag', 'fish_sell_all')
         rule(box)
-        self.fish_full_check = self._toggle(box, 'Full bag check', 'reads the "not enough inventory space" note: sells, '
-                                            'and rejoins if it is still full right after selling', 'fish_full_check')
+        self.fish_full_check = self._toggle(box, 'Full bag check', 'Sells when the game says your bag is full', 'fish_full_check')
         rule(box)
         self.fish_sell_amount = tk.StringVar(value=str(self.cfg.get('fish_sell_amount', 10)))
         amount = []
-        self._row(box, 'Sell amount', 'kinds of fish sold each time, with Sell all off',
+        self._row(box, 'Sell amount', 'Kinds of fish sold when Sell all is off',
                   lambda r: amount.append(entry(r, self.fish_sell_amount, width=6, justify='center', font=('Consolas', 12),
                                                 disabledbackground=PANEL, disabledforeground=DIM)) or amount[0], ipady=6)
         lock = lambda *_: amount[0].configure(state='disabled' if self.fish_sell_all.get() else 'normal')
@@ -1118,9 +1300,11 @@ class App:
 
     def _merchant_card(self, parent):
         box = card(parent, fill='x', padx=16, pady=10)
-        self.collect_on = self._toggle(box, 'Auto merchant collection', 'when a merchant arrives, teleport to it and '
-                                       'buy the chosen items (needs Merchant detection and a Merchant Teleporter)',
-                                       'collect_on')
+        self.merchant_on = self._toggle(box, 'Merchant detection', 'Tells you when a merchant or the boss shows up', 'merchant_on')
+        self.block_on = bool(self.merchant_on.get())
+        self.merchant_on.trace_add('write', self._merchant_toggled)
+        rule(box)
+        self.collect_on = self._toggle(box, 'Auto merchant collection', 'Teleports to merchants and buys the items below', 'collect_on')
         rule(box)
         row = tk.Frame(box, bg=PANEL)
         row.pack(fill='x', padx=18, pady=(10, 4))
@@ -1141,8 +1325,7 @@ class App:
         tk.Label(head, text='Items to buy', bg=PANEL, fg=TEXT, font=(UIB, 10), anchor='w').pack(side='left')
         self.buy_count = tk.Label(head, text='', bg=PANEL, fg=ACCENT, font=(UIB, 9))
         self.buy_count.pack(side='right')
-        tk.Label(box, text='Pick from the list or type a name. Amount empty = as many as the shop sells. None = the '
-                 'shop is only read and posted.', bg=PANEL, fg=DIM, font=(UI, 8), anchor='w', justify='left',
+        tk.Label(box, text='Leave Amount empty to buy all they have', bg=PANEL, fg=DIM, font=(UI, 8), anchor='w', justify='left',
                  wraplength=380).pack(fill='x', padx=18, pady=(2, 6))
         add = tk.Frame(box, bg=PANEL)
         add.pack(fill='x', padx=18, pady=(0, 6))
@@ -1204,6 +1387,8 @@ class App:
 
     def _drop_item(self, name):
         self.item_rows.pop(name)[2].destroy()
+        if not self.item_rows:
+            self.items_box.configure(height=1)
         self._count_items()
         self._autosave_later()
         self.root.after_idle(self._fit_window)
@@ -1219,7 +1404,7 @@ class App:
         for name, (on, qty, _) in self.item_rows.items():
             if on.get():
                 q = qty.get().strip()
-                out[name] = int(q) if q.isdigit() and int(q) > 0 else None
+                out[name] = int(q) if q.isdecimal() and int(q) > 0 else None
         return out
 
     def _fit_window(self):
@@ -1273,11 +1458,11 @@ class App:
         tk.Label(box, text='Discord webhook', bg=PANEL, fg=TEXT, font=(UIB, 10), anchor='w').pack(fill='x', padx=18, pady=(10, 3))
         self.webhook = tk.StringVar(value=self.cfg.get('webhook_url', ''))
         entry(box, self.webhook, show='•', font=('Consolas', 9)).pack(fill='x', padx=22, ipady=6)
-        tk.Label(box, text='Biome, Eden and failsafe notifier', bg=PANEL, fg=DIM, font=(UI, 8), anchor='w').pack(fill='x', padx=18, pady=(4, 8))
+        tk.Label(box, text='Gets biome and Eden pings', bg=PANEL, fg=DIM, font=(UI, 8), anchor='w').pack(fill='x', padx=18, pady=(4, 8))
         tk.Label(box, text='Private server link', bg=PANEL, fg=TEXT, font=(UIB, 10), anchor='w').pack(fill='x', padx=22, pady=(0, 4))
         self.server = tk.StringVar(value=self.cfg.get('private_server', ''))
         entry(box, self.server, font=('Consolas', 9)).pack(fill='x', padx=22, ipady=6)
-        tk.Label(box, text='Used for auto reconnect and for biome notifications', bg=PANEL, fg=DIM, font=(UI, 8),
+        tk.Label(box, text='Used for reconnects and biome pings', bg=PANEL, fg=DIM, font=(UI, 8),
                  anchor='w').pack(fill='x', padx=18, pady=(4, 8))
         tk.Frame(box, bg=PANEL, height=4).pack()
 
@@ -1299,7 +1484,8 @@ class App:
             self._pending = self.root.after(800, self.remember)
 
         self._autosave_later = later
-        for var in (self.auto_items, self.anti_afk, self.merchant_on, self.webhook, self.auto_reconnect, self.server,
+        for var in (self.auto_items, self.rune_on, self.rune_after, self.selector_on, self.selector_pick, self.pop_on,
+                    self.anti_afk, self.merchant_on, self.webhook, self.auto_reconnect, self.server,
                     self.low_end, self.rejoin_browser, self.eden_on, self.eden_path, self.eden_record,
                     self.eden_ping, self.fish_on, self.fish_vip, self.fish_sell, self.fish_sell_all, self.fish_full_check, self.fish_sell_amount, self.collect_on, self.clip_on, self.clip_from,
                     self.clip_quality, self.clip_key_on, self.clip_keys, self.equip_on, self.equip_name):
@@ -1308,11 +1494,19 @@ class App:
     def remember(self):
         try:
             self.wanted = self.wanted_items()               # list edits apply mid-run too
+            self.pop_list = self.pop_items()
             game.save_settings({'auto_items': bool(self.auto_items.get()),
+                                'rune_on': bool(self.rune_on.get()),
+                                'rune_biomes': [n for n, v in self.rune_in.items() if v.get()],
+                                'rune_after': self.rune_delay(),
+                                'selector_on': bool(self.selector_on.get()),
+                                'selector_biome': self.selector_pick.get(),
+                                'pop_on': bool(self.pop_on.get()),
+                                'pop_items': self.pop_items(),
                                 'anti_afk': bool(self.anti_afk.get()),
                                 'merchant_on': bool(self.merchant_on.get()),
                                 'webhook_url': clean_url(self.webhook.get()),
-                                'private_server': self.server.get().strip(),
+                                'private_server': game.tidy_link(self.server.get()),
                                 'auto_reconnect': bool(self.auto_reconnect.get()),
                                 'rejoin_browser': bool(self.rejoin_browser.get()),
                                 'low_end': bool(self.low_end.get()),
@@ -1360,11 +1554,11 @@ class App:
         """Turn what was typed into a real aura name (typos, partial, any case)."""
         typed = self.equip_name.get().strip()
         if not typed:
-            self.equip_hint.configure(text='type an aura', fg=DIM)
+            self.equip_hint.configure(text='Type an aura', fg=DIM)
             return None
         name = equip.resolve(typed)
         if name is None:
-            self.equip_hint.configure(text='no aura found: type more of its name', fg=BAD)
+            self.equip_hint.configure(text='No aura found so type more of its name', fg=BAD)
             return None
         if name != typed:
             self.equip_name.set(name)
@@ -1408,6 +1602,12 @@ class App:
         except ValueError:
             return 0
 
+    def rune_delay(self):
+        try:
+            return max(0, int(self.rune_after.get().strip() or 0))
+        except ValueError:
+            return 0
+
     def sell_amount(self):
         try:
             return max(1, int(self.fish_sell_amount.get().strip() or 10))
@@ -1421,7 +1621,7 @@ class App:
             pass
 
     def _hotkeys(self):
-        """F1/F2 by polling key state. A keyboard hook can freeze Alt+Tab when the macro is busy."""
+        """F1/F2 by polling keys; a keyboard hook can freeze Alt+Tab."""
         self._keyboard = keyboard
         threading.Thread(target=self._poll_hotkeys, daemon=True).start()
 
@@ -1488,7 +1688,8 @@ class App:
     def start_biomes(self, url):
         if self.biome_stop is not None and not self.biome_stop.is_set():
             return
-        if not (url.startswith('https://') or self.merchant_detect or self.clipper or self.equip_aura):
+        if not (url.startswith('https://') or self.merchant_detect or self.clipper or self.equip_aura or self.rune_biomes
+                or self.selector_biome or self.pop_biomes):
             return
         self.biome_stop = threading.Event()
         threading.Thread(target=self._watch_biomes, args=(url,), daemon=True).start()
@@ -1529,7 +1730,7 @@ class App:
         post_merchant(url or self.url, merchant, self.server_link or game.load_settings().get('private_server', ''))
         self._set(phase='%s arrived' % merchant, colour=GOOD)
         if self.collect and merchant in self.collect_names:
-            self.merchant_due, self.merchant_at = merchant, time.monotonic()
+            self.merchant_due, self.merchant_at, self.merchant_tries = merchant, time.monotonic(), 0
 
     def _watch_cache(self):
         """Watches Roblox's cache for merchant animations and keeps the block up."""
@@ -1617,6 +1818,8 @@ class App:
         change = watcher.feed(biome)
         if change:
             name, alert = change
+            self.rune_biome_changed(name)
+            self.pop_biome_changed(name)
             append_history(name)
             server = self.server_link or game.load_settings().get('private_server', '')
             post_biome(url, name, ping=alert, server=server, previous=previous)
@@ -1778,7 +1981,8 @@ class App:
         if self.running or self.updating:
             return
         self.ran = True
-        self.server_link = self.server.get().strip()
+        self.server_link = game.tidy_link(self.server.get())
+        self.server.set(self.server_link)
         self.reconnect_on = bool(self.auto_reconnect.get())
         self.played = False
         self.item_due = {}                      # both due now
@@ -1811,6 +2015,13 @@ class App:
         self.remember()
         self.url = clean_url(self.webhook.get())
         self.use_items = bool(self.auto_items.get())
+        self.rune_biomes = {n for n, v in self.rune_in.items() if v.get()} if self.rune_on.get() else set()
+        self.rune_wait, self.rune_due = self.rune_delay(), None
+        self.selector_biome = self.selector_pick.get() if self.selector_on.get() else None
+        self.selector_due = time.monotonic() if self.selector_biome else None
+        self.selector_refused = self.selector_missed = 0
+        self.pop_list, self.pop_due, self.pop_left = self.pop_items(), None, None
+        self.pop_biomes = set(self.pop_list) if self.pop_on.get() else set()
         self.clip_min = clip_floor(self.clip_from.get())
         self.clipper = None
         if self.clip_on.get() and self.clip_key_on.get():
@@ -1923,10 +2134,11 @@ class App:
         game.ABORT = False
         game.arm()
         game.fresh_session()
+        self.told_dead = False
         game.set_pace(2.0 if self.slow_pc else 1.0)
         note('run', 'started: %s' % device_line())
         self.joined_at = time.monotonic()
-        self.need_rejoin = None
+        self.need_rejoin = self.out_since = None
         self.watch = game.Watch()
         self.watch.poll()
         if not game.roblox_running():
@@ -1943,20 +2155,23 @@ class App:
             game.release_all()
             return
         self.fit_roblox()
+        if self.need_rejoin is None:
+            self.claim_daily()                          # joined by hand before Start
 
         seer = eden.Watcher() if self.eden_on.get() else None
         afk_due = time.monotonic() + AFK_EVERY_S
+        stray_due = time.monotonic() + STRAY_EVERY_S
         halt = lambda: game.ABORT or self.need_rejoin is not None
+        busy = lambda: halt() or self.merchant_due is not None or self.pop_due is not None   # these drop everything
         self.fisher = fishing.Fisher(vip=bool(self.fish_vip.get()), sell_every=self.sell_every(),
                                      sell_amount=self.sell_amount(), sell_all=bool(self.fish_sell_all.get()),
                                      full_check=bool(self.fish_full_check.get()),
                                      say=lambda m: note('fishing', m),
                                      report=self.post_fishing) if self.fish_on.get() else None
-        merchant_wait = None                            # merchant came mid-fish
         self._set(phase='running', colour=GOOD)
         while not game.ABORT:
             if self.need_rejoin:
-                self.merchant_due = merchant_wait = None    # merchant is gone with the old server
+                self.merchant_due = None                    # merchant is gone with the old server
                 self._merchant_posted = {}                  # post again on the new server
                 if self.fisher:
                     self.fisher.hold = self.fisher.pause = False
@@ -1973,7 +2188,7 @@ class App:
                 if self.crack_on and not self.need_rejoin:
                     self.use_crack(halt, 'back to Eden\'s dimension after the rejoin')
             if (self.got_past_block and self.merchant_detect and self.reconnect_on and not self.merchant_due
-                    and not (self.fisher and self.fisher.line_out)):
+                    and not (self.fisher and self.fisher.line_out) and not is_rare(self.biome_now)):
                 self.got_past_block = False
                 note('merchant', 'Roblox loaded a merchant\'s real animation and keeps it: reopening it so every '
                                  'visit shows again')
@@ -1981,49 +2196,70 @@ class App:
                 self.need_rejoin = 'a merchant was loaded past the block'
                 continue
             self.check_in_game()
+            if game.USE_DEAD and not self.told_dead:
+                self.told_dead = True
+                note('items', 'Roblox stopped taking item uses: no item, potion or Biome Selector until a rejoin')
+                self.tell('Item uses stopped', 'Roblox refused one and takes no more until a rejoin: items, potions '
+                          'and the Biome Selector wait for it', EMBED_BAD, 'Items')
             if self.need_rejoin:
+                continue
+            if game.USE_DEAD and self.reconnect_on and not is_rare(self.biome_now):     # a rejoin would lose it
+                note('items', 'Roblox stopped taking item uses: rejoining')
+                game.close_roblox()
+                self.need_rejoin = 'Roblox stopped taking item uses'
+                continue
+            if time.monotonic() >= stray_due and not busy():
+                stray_due = time.monotonic() + STRAY_EVERY_S
+                self.close_strays()
+            if self.pop_due and not self.need_rejoin:
+                if self.fisher:
+                    self.drop_fishing(halt, '%s started: stopping to pop' % pretty(self.pop_due))
+                self.pop_turn(halt)
+                if self.fisher:
+                    self.fisher.lost()
                 continue
             if self.merchant_due and time.monotonic() - self.merchant_at > MERCHANT_STALE_S:
                 note('merchant', '%s came %d s ago: gone by now, not teleporting' % (self.merchant_due, MERCHANT_STALE_S))
-                self.merchant_due = merchant_wait = None
-                if self.fisher:
-                    self.fisher.hold = False
+                self.merchant_due = None
             if self.merchant_due and not self.need_rejoin:
-                fishing_now = self.fisher is not None and self.fisher.at_spot and self.fisher.line_out
-                if fishing_now and merchant_wait is None:
-                    merchant_wait = time.monotonic()             # land the fish on the line first
-                    self.fisher.hold = True
-                    note('merchant', '%s arrived: finishing the fish on the line first' % self.merchant_due)
-                elif not fishing_now or time.monotonic() - merchant_wait > MERCHANT_CATCH_S:
-                    self.collect_merchant(self.merchant_due, halt)
-                    self.merchant_due = merchant_wait = None
-                    if self.fisher:
-                        self.fisher.hold = False
-                        self.fisher.lost()
-                    continue
+                if self.fisher:
+                    self.drop_fishing(halt, '%s arrived: stopping to go buy' % self.merchant_due)
+                self.merchant_tries = getattr(self, 'merchant_tries', 0) + 1
+                if self.collect_merchant(self.merchant_due, halt) is not False or self.merchant_tries >= MERCHANT_TRIES:
+                    self.merchant_due, self.merchant_tries = None, 0
+                if self.fisher:
+                    self.fisher.lost()
+                continue
             if self.use_items and not game.ABORT and self.items_due():
-                self.items_turn(halt)
-            if (self.equip_due is not None and time.monotonic() >= self.equip_due and not self.need_rejoin
-                    and not game.ABORT):
-                self.between_fish(halt, 'equip', 'putting %s back on' % self.equip_aura, self.equip_turn)
+                self.items_turn(busy)
+            if (self.rune_due is not None and time.monotonic() >= self.rune_due and not busy()):
+                self.between_fish(busy, 'rune', 'Cursed Rune Fragment due', self.rune_turn)
+            if (self.selector_due is not None and time.monotonic() >= self.selector_due and not busy()
+                    and not game.USE_DEAD and not rune_biome(self.biome_now, HOLD_BIOMES)
+                    and not self.selector_landed()):
+                self.between_fish(busy, 'selector', 'Biome Selector due', self.selector_turn)
+            if (self.equip_due is not None and time.monotonic() >= self.equip_due and not busy()):
+                self.between_fish(busy, 'equip', 'putting %s back on' % self.equip_aura, self.equip_turn)
             if seer is not None and not self.need_rejoin and seer.seen():
                 self.eden_found()
                 afk_due = time.monotonic() + EDEN_AFK_REST_S
-                self.nap(eden.COOLDOWN_S)
+                self.nap(eden.COOLDOWN_S, busy)
                 if self.fisher:
                     self.fisher.lost()
-            if self.fisher is not None and not self.need_rejoin:
+            if self.fisher is not None and not busy():
+                if self.fisher.pause and not self.fisher.line_out:      # stale: what asked isn't due (biome ended)
+                    self.fisher.pause, self.fisher.recast = False, self.fisher.at_spot
                 try:
-                    self.fisher.step(halt, LOOK_EVERY_S * 4)
+                    self.fisher.step(busy, LOOK_EVERY_S * 4)
                 except Exception as e:
                     note('fishing', 'failed - %s: %s' % (type(e).__name__, e))
                     self.fisher.lost()
                     self.nap(LOOK_EVERY_S)
-                if self.fisher.rejoin:
-                    self.fisher.rejoin = False
+                if self.fisher.rejoin and not is_rare(self.biome_now):     # a rejoin would lose the biome
+                    why, self.fisher.rejoin = self.fisher.rejoin, False
                     if self.reconnect_on:
                         game.close_roblox()
-                        self.need_rejoin = 'inventory still full after selling'
+                        self.need_rejoin = why
                     else:
                         note('fishing', 'not rejoining: Auto reconnect is off')
                 self.beat = time.monotonic()
@@ -2158,7 +2394,7 @@ class App:
         if why and game.roblox_running() and game.find_play() is None:
             # old disconnect lines can be hours old; no Play button means we're in
             note('run', 'the log says "%s", but the client is in a game: starting anyway' % why)
-            why = None
+            why = watch.state = watch.dropped = None        # or the connection watcher rejoins on the same old line
         if why:
             self.need_rejoin = why
             if not self.reconnect():
@@ -2178,7 +2414,18 @@ class App:
             note('window', 'sizing the Roblox window failed: %s: %s' % (type(e).__name__, e))
 
     def reconnect(self):
-        """Get back in game. True once in, False only on Stop."""
+        """Get back in game. True once in, False only on Stop.
+        The connection watcher waits, or its old lost state queues a second rejoin."""
+        self.rejoining = True
+        try:
+            back = self._reconnect()
+        finally:
+            self.rejoining = False
+        if back:
+            game.USE_DEAD, game.USE_GIVE_UPS, self.told_dead = False, 0, False     # a new client takes item uses again
+        return back
+
+    def _reconnect(self):
         why, self.need_rejoin = self.need_rejoin, None
         self.out_since = None
         if 'by itself' in (why or '') and self.connected():
@@ -2196,7 +2443,6 @@ class App:
             self.beat = time.monotonic()
             if game.ABORT:
                 return False
-            self.rejoining = True
             failed = ''
             try:
                 ok = game.rejoin(self.server_link, stop=lambda: game.ABORT, browser=self.browser_rejoin,
@@ -2209,7 +2455,6 @@ class App:
                 ok, failed = False, '%s: %s' % (type(e).__name__, e)
             finally:
                 self.watch = game.Watch()
-                self.rejoining = False
             if game.ABORT:
                 return False
             if ok:
@@ -2308,16 +2553,14 @@ class App:
         """Claim daily rewards, after every Play back into the game. Never raises."""
         if game.ABORT:
             return
-        if not game.daily_clicks_ready():
-            note('daily', 'daily rewards skipped: Claim and Close are not calibrated')
-            return
         try:
             game.paced(game.DAILY_WAIT_S)
             done = game.daily_by_clicks()
         except Exception as e:
-            done = False
+            done = None
             note('daily', 'crashed: %s: %s' % (type(e).__name__, e))
-        note('daily', 'daily rewards by clicks: %s' % ('claimed and closed' if done else 'did not finish'))
+        note('daily', {'claim': 'daily rewards claimed', 'claimed': 'daily rewards already claimed: window closed',
+                       False: 'no daily rewards window'}.get(done, 'daily rewards check failed'))
 
     def post_fishing(self, detail):
         """Fishing failsafe screenshot to the webhook. Never raises."""
@@ -2329,19 +2572,23 @@ class App:
             note('fishing', 'webhook: %s: %s' % (type(e).__name__, e))
 
     def collect_merchant(self, name, halt):
-        """Teleport to the merchant, buy what's wanted, post the shop."""
+        """Teleport to the merchant, buy what's wanted, post the shop. False if the shop never opened."""
         say = lambda m: note('merchant', m)
         self._set(phase='going to %s' % name, colour=GOOD)
+        moved, got = True, None
         try:
             if self.fisher is not None and not fishing.respawn(halt):
                 return
             got = shop.collect(name, self.wanted, halt, say)
-            if got is None:
-                if not halt():
+            moved = got is not False                    # no teleport: still where we were, no crack needed
+            if not got:
+                if not halt() and getattr(self, 'merchant_tries', MERCHANT_TRIES) >= MERCHANT_TRIES:
                     self.tell("Could not open %s's shop" % name, 'No Merchant Teleporter, or the shop did not open',
                               EMBED_BAD, 'Merchant')
+                elif not halt():
+                    say('the shop did not open: trying again while %s is here' % name)
                 self.close_guis()
-                return
+                return False
             found, bought = got
             items = ', '.join(found[s] for s in sorted(found)) or 'Could not read the items'
             post_shot(self.url, 'Merchant Items - %s' % name, MERCHANT_COLOURS.get(name, EMBED_GOLD),
@@ -2352,15 +2599,18 @@ class App:
         except Exception as e:
             say('failed - %s: %s' % (type(e).__name__, e))
             self.tell('Merchant collection failed', '`%s: %s`' % (type(e).__name__, e), EMBED_BAD, 'Merchant')
+            self.merchant_tries = MERCHANT_TRIES                # an error is not worth a second go
             try:
                 shop.close_shop()                       # an open shop blocks the walk back
             except Exception:
                 pass
             self.close_guis()
         finally:
-            self.in_dimension = False                   # the teleporter leaves Eden's dimension
-            if self.crack_on and not halt():
-                self.use_crack(halt, 'back to Eden\'s dimension after %s' % name)
+            if moved:
+                self.in_dimension = False               # the teleporter leaves Eden's dimension
+                # the crack waits while the loop is about to try this merchant again
+                if self.crack_on and not halt() and (got or self.merchant_tries >= MERCHANT_TRIES):
+                    self.use_crack(halt, 'back to Eden\'s dimension after %s' % name)
 
     def _one_of(self, turned, other, name):
         """Fishing and Eden can't both be on (fishing walks away from the crack)."""
@@ -2383,6 +2633,22 @@ class App:
         if not ok and not halt():
             self.tell('Portable Crack not used', 'Ensure you have a Portable Crack', EMBED_BAD, 'Eden')
         return self.in_dimension
+
+    def drop_fishing(self, halt, why):
+        """A merchant came or a pop is due: reel in or shut the catch window now, no waiting for the fish."""
+        note('fishing', why)
+        self.fisher.pause = self.fisher.hold = False
+        try:
+            if not self.fisher.at_spot:                             # may have been mid-sale at Flarg
+                fishing.points.click('fishingShopCloseButton', 0.2)
+                fishing.points.leave_dialogue(skip=True)
+            elif fishing.window_state() == 'catch':
+                fishing.close_catch(halt)
+            elif self.fisher.line_out:
+                self.fisher.reel_in(halt)
+        except Exception as e:
+            note('merchant', 'reeling in failed - %s: %s' % (type(e).__name__, e))
+        self.fisher.line_out = False
 
     def items_turn(self, halt):
         self.between_fish(halt, 'items', 'SC/BR due', self.spend_items)
@@ -2438,9 +2704,132 @@ class App:
         else:
             self.equip_due = time.monotonic()           # stopped or rejoining: check again after
 
+    def rune_biome_changed(self, name):
+        """A picked biome started: a Cursed Rune Fragment is due after the set time. Any other cancels it."""
+        biome = rune_biome(name, self.rune_biomes)
+        if biome is None:
+            self.rune_due = None
+            return
+        self.rune_due, self.rune_tries = time.monotonic() + self.rune_wait, 0
+        note('rune', '%s started: a Cursed Rune Fragment in %d s' % (pretty(biome), self.rune_wait))
+
+    def rune_turn(self):
+        say = lambda m: note('rune', m)
+        biome = rune_biome(self.biome_now, self.rune_biomes)
+        if biome is None:
+            say('the biome is over (%s now): no Cursed Rune Fragment used' % (pretty(self.biome_now) or 'unknown'))
+            self.rune_due = None
+            return
+        try:
+            used = game.item_pass(say=say, terms=(RUNE,))
+        except Exception as e:
+            used = []
+            say('failed - %s: %s' % (type(e).__name__, e))
+            self.close_guis()
+        self.rune_tries += 1
+        if used:
+            self.rune_due = None
+            self.tell('Used a Cursed Rune Fragment', pretty(biome), EMBED_GOOD, 'Rune')
+        elif self.rune_tries < RUNE_TRIES:
+            self.rune_due = time.monotonic() + RUNE_RETRY_S
+        else:
+            self.rune_due = None
+            self.tell('Cursed Rune Fragment not used', 'Ensure you have one', EMBED_BAD, 'Rune')
+
+    def pop_biome_changed(self, name):
+        """A picked biome started: pop now. Leaving it cancels a pop that hasn't started."""
+        biome = rune_biome(name, self.pop_biomes)
+        self.pop_due = biome if biome and self.pop_list.get(biome) else None
+        self.pop_left = None
+        if self.pop_due:
+            note('pop', '%s started: popping %s' % (pretty(biome), ', '.join(
+                '%s x%d' % (n, a) for n, a in self.pop_list[biome].items())))
+
+    def pop_turn(self, halt):
+        """Use each listed potion, in order, while the biome lasts."""
+        biome, self.pop_due = self.pop_due, None
+        left = getattr(self, 'pop_left', None)
+        left = dict(left[1]) if left and left[0] == biome else dict(self.pop_list.get(biome, {}))
+        self.pop_left = None
+        say = lambda m: note('pop', m)
+        over = lambda: halt() or rune_biome(self.biome_now, {biome}) is None     # also stops mid-potion
+        used = []
+        try:
+            for name, amount in list(left.items()):
+                if over():
+                    break
+                n = potions.use(name, amount, over, say)
+                if n:
+                    used.append('%s x%d' % (name, n))
+                left[name] = amount - n if halt() else 0        # done, or not in the Inventory
+                if left[name] <= 0:
+                    del left[name]
+        except Exception as e:
+            say('failed - %s: %s' % (type(e).__name__, e))
+        finally:
+            self.close_guis()
+        if left and rune_biome(self.biome_now, {biome}) is None:
+            say('%s is over (%s now): stopping' % (pretty(biome), pretty(self.biome_now) or 'unknown'))
+        elif left and halt() and not game.ABORT and self.pop_due is None:
+            self.pop_left, self.pop_due = (biome, left), biome      # a rejoin cut it short: finish once back in
+            say('interrupted: %s left for after the rejoin' % ', '.join(left))
+        if used:
+            self.tell('Popped in %s' % pretty(biome), ', '.join(used), biome_colour(biome), 'Pop')
+        elif not halt():
+            self.tell('Nothing popped in %s' % pretty(biome), 'Roblox takes no item uses until a rejoin' if game.USE_DEAD
+                      else 'None of the listed potions were found', EMBED_BAD, 'Pop')
+
+    def selector_landed(self):
+        return base_biome(self.biome_now).replace(' ', '') == self.selector_biome.replace(' ', '')
+
+    def selector_turn(self):
+        say = lambda m: note('selector', m)
+        halt = lambda: game.ABORT or self.need_rejoin is not None or self.merchant_due is not None or self.pop_due
+        biome = self.selector_biome
+        drive = selector.DRIVES[biome]
+        try:
+            outcome, wait = selector.use(biome, halt, say)
+        except Exception as e:
+            outcome, wait = 'refused', None
+            say('failed - %s: %s' % (type(e).__name__, e))
+            self.close_guis()
+        now = time.monotonic()
+        self.selector_refused = self.selector_refused + 1 if outcome == 'refused' else 0
+        missed = outcome in ('no selector', 'no drive')        # a lost key or a cutscene does this too
+        self.selector_missed = getattr(self, 'selector_missed', 0) + 1 if missed else 0
+        if missed:                                              # back off, never give up: 5, 10, 20, 40, 60 min
+            wait = min(SELECTOR_RETRY_S * 2 ** (self.selector_missed - 1), 60 * 60)
+            self.selector_due = now + wait
+            what = 'No Biome Selector found in the Inventory' if outcome == 'no selector' else \
+                '%s is not in its list (not unlocked yet?)' % drive
+            say('%s (miss %d): looking again in %d min' % (what, self.selector_missed, wait // 60))
+            if self.selector_missed == SELECTOR_MISSES:
+                self.tell('Biome Selector not used', '%s. Trying again every hour at most' % what, EMBED_BAD,
+                          'Selector')
+        elif self.selector_refused >= SELECTOR_REFUSALS:
+            self.selector_due = None
+            self.tell('Biome Selector stopped', 'Refused %d times in a row: out of %s?' % (SELECTOR_REFUSALS, drive),
+                      EMBED_BAD, 'Selector')
+        elif outcome == 'used':
+            self.selector_due = now + selector.EVERY_S
+            self.tell('Biome Selector used', '%s (%s)' % (pretty(biome), drive), EMBED_GOOD, 'Selector')
+        elif outcome == 'recharging':
+            self.selector_due = now + wait + ITEM_SPARE_S
+            say('next try in %d min' % ((wait + ITEM_SPARE_S) // 60))
+        elif outcome == 'stopped':
+            self.selector_due = now
+        elif outcome == 'refused':
+            self.selector_due = now + SELECTOR_REFUSED_S
+        elif outcome == 'unstable':
+            self.selector_due = now + SELECTOR_RETRY_S
+        else:
+            self.selector_due = None
+            self.tell('Biome Selector stopped', 'Unknown outcome: %s' % outcome, EMBED_BAD, 'Selector')
+
     def items_due(self):
         now = time.monotonic()
-        return any(now >= self.item_due.get(t, 0.0) for t in (game.BR, game.SC))
+        return (not game.USE_DEAD and not rune_biome(self.biome_now, HOLD_BIOMES)
+                and any(now >= self.item_due.get(t, 0.0) for t in (game.BR, game.SC)))
 
     def spend_items(self):
         """Use whichever items are due. True if menus were opened."""
@@ -2470,6 +2859,19 @@ class App:
         if missed:
             self.close_guis()
         return True
+
+    def close_strays(self):
+        """Shut an Inventory or Aura Storage left open (one hidden by a cutscene comes back after)."""
+        try:
+            if not game.inventory_open():
+                return
+        except Exception:
+            return
+        note('menus', 'a window was left open (a cutscene hid it?): closing it')
+        self.close_guis()
+        if self.fisher:
+            self.fisher.line_out = False
+            self.fisher.recast = self.fisher.at_spot
 
     def close_guis(self):
         try:

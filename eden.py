@@ -13,7 +13,7 @@ POINTS = (('contract', 'Eden: Contract button'),)
 SHOWS = 0.75             # match score for Eden
 SIGNED = 0.8             # match score for the contract
 SAME = 0.98              # screen this close to the last one isn't searched again
-LOOK_EVERY_S = 3.0       # a search costs ~0.6 core-seconds and Eden stays for minutes
+LOOK_EVERY_S = 3.0       # a search is costly and Eden stays for minutes
 SCALES = np.linspace(0.5, 1.5, 20)
 SETTLE_S = 25.0          # wait after Eden shows, before walking
 TALK_S = 5.0             # after E, before the Contract button
@@ -29,7 +29,7 @@ PATH = [(0, 'down', 's'), (0.17, 'up', 's'), (0.22, 'down', 's'), (0.22, 'down',
 
 
 def _template(name):
-    """Through numpy because cv2.imread chokes on non-ASCII usernames in the path."""
+    """Through numpy: cv2.imread fails on non-ASCII paths."""
     return cv2.imdecode(np.fromfile(os.path.join(HERE, name), np.uint8), cv2.IMREAD_GRAYSCALE)
 
 

@@ -1,10 +1,7 @@
-"""Merchant Learner: watches Roblox's cache (rbx-storage.db) and, when you say a merchant just arrived (F8 or its
-button), counts the animations Roblox used in the minute and a half before as seen with that merchant: their addresses
-(the lookup rows, for detection) and their downloaded files' keys (for blocking). Any number of visits: what turned
-up in most of them is kept. Saves them where MMacro reads them.
-With "Read chat" on it also reads Roblox's chat, and a "<merchant> has arrived" line does what F8 does, so it can be
-left on all night. Boss ("... is patrolling the graveyard" in chat) keeps every kind of asset, not just animations.
-Reads the cache and the screen only: nothing in Roblox is changed, blocked or sent anywhere."""
+"""Merchant Learner: when you say a merchant arrived (F8 or the button), counts the animations used
+in the 90 s before. What shows up in most visits is kept where MMacro reads it.
+"Read chat" does the same on a "<merchant> has arrived" line. Boss keeps every kind of asset.
+Only reads the cache and the screen: nothing in Roblox is changed."""
 import ctypes
 import glob
 import json
@@ -21,8 +18,8 @@ import time
 import tkinter as tk
 from tkinter import messagebox
 
-os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')      # numpy's maths library sets memory aside for every core as
-                                                        # it loads, and a PC short of it cannot open the learner
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')      # numpy's maths library reserves memory per core as
+                                                        # it loads; a PC short of it can't open the learner
 
 MERCHANTS = ('Mari', 'Jester', 'Rin')
 BOSS = 'Boss'
@@ -46,7 +43,7 @@ COOLDOWN_S = 600                # the line stays in chat a while: one visit is r
 GONE_S = 60                     # and only once it has been out of chat this long can it be read again
 SAME_VISIT_S = 300              # F8 and chat on one visit count it once
 WARM_S = 120                    # right after opening, everything Roblox loads looks new
-BOSS_BEFORE_S = 15              # the boss loads around its line: a short window keeps other players' auras out
+BOSS_BEFORE_S = 15              # a short window keeps other players' auras out
 _ARRIVED = re.compile(r'(?<![a-z])(mari|jester|rin)\W*(?:has\W*)?ar+iv')   # OCR sometimes drops the spaces
 _BOSS = re.compile(r'patrol+ing')          # "Sinister S. is patrolling the graveyard.."
 
@@ -86,7 +83,7 @@ def touched_files(since_ms, path=DB):
 
 
 def body(key, path=DB):
-    """The file Roblox keeps under this key (inline or in rbx-storage), without its RBXH header; None if gone."""
+    """The file kept under this key, without its RBXH header; None if gone."""
     con = sqlite3.connect(path, timeout=2)
     try:
         con.execute('PRAGMA query_only = 1')
@@ -116,13 +113,13 @@ def is_model(key, path=DB):
 
 
 def kept(counts, visits):
-    """What turned up in at least 60% of the visits (every one, for 1 or 2), so one late F8 spoils nothing."""
+    """What turned up in at least 60% of the visits (all, for 1 or 2), so one late F8 spoils nothing."""
     need = max(1, math.ceil(visits * 0.6))
     return {k for k, n in counts.items() if n >= need}
 
 
 def load(path=OUT):
-    """(counts, visits, file counts): per merchant, how many visits each address / file key turned up in."""
+    """(counts, visits, file counts): per merchant, how many visits each address / file key showed up in."""
     try:
         with open(path, encoding='utf-8') as f:
             data = json.load(f)
@@ -134,7 +131,7 @@ def load(path=OUT):
         return {n: {k: int(v) for k, v in (t.get(n) or {}).items()} for n in NAMES}
     visits = data.get('visits') if isinstance(data.get('visits'), dict) else {}
     counts, file_counts = table('counts'), table('file_counts')
-    # a visit that caught nothing (older builds counted those) only raises the bar for the real ones
+    # a visit that caught nothing only raises the bar for the real ones
     return counts, {n: int(visits.get(n) or 0) if counts[n] or file_counts[n] else 0 for n in NAMES}, file_counts
 
 
@@ -187,9 +184,8 @@ MARK = 'merchant_learner.mark'      # in every copy the one-file exe unpacks
 
 
 def clear_old_unpacks(temp=None, current=None, fresh_s=120):
-    """Delete the copies of itself the one-file exe unpacked into %TEMP% and never got to remove (killed, crashed,
-    Windows shut down under it). A running copy's Python DLL cannot be deleted, so that copy is left whole, and so is
-    one changed in the last fresh_s seconds (still unpacking). Returns how many went."""
+    """Delete leftover unpacked copies of the exe in %TEMP%. Running or still-unpacking copies are left.
+    Returns how many went."""
     current = current or getattr(sys, '_MEIPASS', None)
     temp = temp or tempfile.gettempdir()
     gone = 0
@@ -512,7 +508,7 @@ class Learner:
             self.poll()
         except Exception:
             pass
-        # new since this opened, or seen on an earlier visit and used again now (Learner left open between visits)
+        # new since this opened, or seen on an earlier visit and used again now
         found = ({a for a, t in self.first.items() if t >= since}
                  | {a for a in self.counts[name] if self.last.get(a, 0) >= since})
         if name != BOSS:

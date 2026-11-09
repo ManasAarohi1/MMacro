@@ -1,6 +1,6 @@
-"""Merchant detection: watch rbx-storage.db for a merchant's animation getting used.
-Roblox keeps a loaded animation in memory, so we block those files (dummy record, valid checksums) and every visit
-shows up, not just the first. The block comes out again when detection stops."""
+"""Merchant detection: watch rbx-storage.db for a merchant's animation being used.
+Loaded animations stay in memory, so their files are blocked to see every visit.
+The block is removed when detection stops."""
 import glob
 import os
 import re
@@ -13,7 +13,7 @@ from urllib.request import pathname2url
 NAMES = ('Mari', 'Jester', 'Rin', 'Boss')
 ANIMATION = b'roblox-assettypeid: 24'
 _ADDRESS = re.compile(rb'/(?:v\d+/)?sc\d+/([0-9a-f]{32})')
-# from MerchantLearner: each merchant's animation address and its file's cache key, same on every PC
+# from MerchantLearner: each merchant's animation address and file cache key
 ADDRESSES = {'Mari': {'e19e08c3454fe2d8fac8d447434a7c16'},
              'Jester': {'7a41a0002e8294562cd0ac3048386152'},
              'Rin': {'6a3e15a8e4d909486bc445bdb8fe4996'},
@@ -60,7 +60,7 @@ def touched(since_ms, path=None):
         return []
     con = _open(path)
     try:
-        # +category makes sqlite use the atime index instead of scanning ~40k rows
+        # +category makes sqlite use the atime index
         rows = con.execute('SELECT content, atime FROM files WHERE +category = 11 AND atime > ?', (int(since_ms),))
         out = []
         for content, atime in rows:
@@ -113,7 +113,7 @@ def record(body):
             + struct.pack('<6I', 200, 0, 0, len(body), xxh32(body) if body else 0, 0) + body)
 
 
-# valid checksums but not an animation, so it fails to load (an empty one just gets downloaded again)
+# valid checksums but not an animation, so it fails to load
 BLOCKED = record(b'MMacro: this merchant animation is blocked so every visit is seen\n')
 
 
