@@ -78,7 +78,7 @@ SMALL_BUTTON = dict(bg=SUNK, fg=TEXT, activebackground=SUNK, activeforeground=AC
                     highlightthickness=1, highlightbackground=EDGE)
 
 TITLE = 'MMacro'
-VERSION = '1.1.0'
+VERSION = '1.1.1'
 RELEASE_PAGE = 'https://github.com/ManasAarohi1/MMacro/releases/latest'
 RELEASES = os.environ.get('MMACRO_UPDATE_URL') or 'https://api.github.com/repos/ManasAarohi1/MMacro/releases/latest'
 INVITE = 'https://discord.gg/oppression'
@@ -114,6 +114,7 @@ EQUIP_RETRY_S = 5 * 60                  # retry a failed equip after this
 JOIN_NONE_S = 300                       # 'nothing equipped' right after a join = title screen
 EQUIP_GAP_S = 90                        # Aura Storage at most this often (auto roll swaps fast)
 MERCHANT_STALE_S = 150                  # merchants stay ~3 min
+DAILY_LATE_S = 90                       # no reset by then (nothing that resets is on): daily rewards anyway
 STRAY_EVERY_S = 20                      # look for a window left open (a cutscene hid it while it was closed)
 MERCHANT_REPEAT_S = 600                 # one post per visit (the animation replays)
 MERCHANT_TRIES = 3                      # a shop that didn't open is tried again while the merchant is still there
@@ -860,7 +861,6 @@ class App:
         self.need_rejoin = None
         self.start_again = False
         self.item_due = {}
-        self.told_dead = False          # said once that Roblox stopped taking item uses
         self._toast = None
         self._key_stop = False          # F2 stopped it: say 'stopped' once done
         self.played = False             # Play pressed in a run: claim daily rewards once back in
@@ -2134,7 +2134,6 @@ class App:
         game.ABORT = False
         game.arm()
         game.fresh_session()
-        self.told_dead = False
         game.set_pace(2.0 if self.slow_pc else 1.0)
         note('run', 'started: %s' % device_line())
         self.joined_at = time.monotonic()
@@ -2156,7 +2155,7 @@ class App:
             return
         self.fit_roblox()
         if self.need_rejoin is None:
-            self.claim_daily()                          # joined by hand before Start
+            self.daily_later()                          # joined by hand before Start
 
         seer = eden.Watcher() if self.eden_on.get() else None
         afk_due = time.monotonic() + AFK_EVERY_S
@@ -2196,17 +2195,7 @@ class App:
                 self.need_rejoin = 'a merchant was loaded past the block'
                 continue
             self.check_in_game()
-            if game.USE_DEAD and not self.told_dead:
-                self.told_dead = True
-                note('items', 'Roblox stopped taking item uses: no item, potion or Biome Selector until a rejoin')
-                self.tell('Item uses stopped', 'Roblox refused one and takes no more until a rejoin: items, potions '
-                          'and the Biome Selector wait for it', EMBED_BAD, 'Items')
             if self.need_rejoin:
-                continue
-            if game.USE_DEAD and self.reconnect_on and not is_rare(self.biome_now):     # a rejoin would lose it
-                note('items', 'Roblox stopped taking item uses: rejoining')
-                game.close_roblox()
-                self.need_rejoin = 'Roblox stopped taking item uses'
                 continue
             if time.monotonic() >= stray_due and not busy():
                 stray_due = time.monotonic() + STRAY_EVERY_S
@@ -2235,9 +2224,12 @@ class App:
             if (self.rune_due is not None and time.monotonic() >= self.rune_due and not busy()):
                 self.between_fish(busy, 'rune', 'Cursed Rune Fragment due', self.rune_turn)
             if (self.selector_due is not None and time.monotonic() >= self.selector_due and not busy()
-                    and not game.USE_DEAD and not rune_biome(self.biome_now, HOLD_BIOMES)
+                    and not rune_biome(self.biome_now, HOLD_BIOMES)
                     and not self.selector_landed()):
                 self.between_fish(busy, 'selector', 'Biome Selector due', self.selector_turn)
+            if game.after_align and time.monotonic() >= self.daily_by and not busy():
+                game.after_align = None
+                self.claim_daily()
             if (self.equip_due is not None and time.monotonic() >= self.equip_due and not busy()):
                 self.between_fish(busy, 'equip', 'putting %s back on' % self.equip_aura, self.equip_turn)
             if seer is not None and not self.need_rejoin and seer.seen():
@@ -2421,8 +2413,6 @@ class App:
             back = self._reconnect()
         finally:
             self.rejoining = False
-        if back:
-            game.USE_DEAD, game.USE_GIVE_UPS, self.told_dead = False, 0, False     # a new client takes item uses again
         return back
 
     def _reconnect(self):
@@ -2430,7 +2420,7 @@ class App:
         self.out_since = None
         if 'by itself' in (why or '') and self.connected():
             note('connection', 'already back in the game (%s)' % why)
-            self.claim_daily()
+            self.daily_later()
             self.watch = game.Watch()
             return True
         if not self.reconnect_on:
@@ -2460,7 +2450,7 @@ class App:
             if ok:
                 note('connection', 'rejoined')
                 self.tell('Rejoined the private server', '', EMBED_GOOD, 'Connection')
-                self.claim_daily()
+                self.daily_later()
                 return True
             wait = REJOIN_WAITS[min(k, len(REJOIN_WAITS) - 1)]
             note('connection', 'rejoin %d failed (%s), again in %d s' % (k + 1, failed or 'see above', wait))
@@ -2480,7 +2470,7 @@ class App:
             if self.connected(watch):
                 note('connection', 'back in the game')
                 self.tell('Back in the game', '', EMBED_GOOD, 'Connection')
-                self.claim_daily()
+                self.daily_later()
                 self.watch = game.Watch()
                 return True
             if game.find_play() is not None and time.monotonic() - clicked > PLAY_EVERY_S:
@@ -2537,7 +2527,7 @@ class App:
             self.out_since = None
             if self.played and logged_in:
                 self.played = False
-                self.claim_daily()
+                self.daily_later()
             return
         self.out_since = self.out_since or mono
         if mono - self._played > PLAY_EVERY_S:
@@ -2548,6 +2538,11 @@ class App:
             note('connection', 'not in a game for %d minutes' % (OUT_S // 60))
             self.out_since = None
             self.need_rejoin = 'not in a game for %d minutes' % (OUT_S // 60)
+
+    def daily_later(self):
+        """Daily rewards after the first reset + camera squaring since joining: the window shows late."""
+        game.after_align = self.claim_daily
+        self.daily_by = time.monotonic() + DAILY_LATE_S
 
     def claim_daily(self):
         """Claim daily rewards, after every Play back into the game. Never raises."""
@@ -2579,14 +2574,15 @@ class App:
         try:
             if self.fisher is not None and not fishing.respawn(halt):
                 return
+            game.tilt_up(halt)                          # look down from above while at the merchant
             got = shop.collect(name, self.wanted, halt, say)
             moved = got is not False                    # no teleport: still where we were, no crack needed
             if not got:
                 if not halt() and getattr(self, 'merchant_tries', MERCHANT_TRIES) >= MERCHANT_TRIES:
-                    self.tell("Could not open %s's shop" % name, 'No Merchant Teleporter, or the shop did not open',
+                    self.tell("Could not open %s's shop" % name, shop.why or 'The shop did not open',
                               EMBED_BAD, 'Merchant')
                 elif not halt():
-                    say('the shop did not open: trying again while %s is here' % name)
+                    say('%s: trying again while %s is here' % (shop.why or 'the shop did not open', name))
                 self.close_guis()
                 return False
             found, bought = got
@@ -2606,6 +2602,10 @@ class App:
                 pass
             self.close_guis()
         finally:
+            if not halt():                              # undo the tilt: reset, then square the camera
+                if moved:
+                    fishing.respawn(halt)
+                game.align_camera(halt)
             if moved:
                 self.in_dimension = False               # the teleporter leaves Eden's dimension
                 # the crack waits while the loop is about to try this merchant again
@@ -2776,8 +2776,7 @@ class App:
         if used:
             self.tell('Popped in %s' % pretty(biome), ', '.join(used), biome_colour(biome), 'Pop')
         elif not halt():
-            self.tell('Nothing popped in %s' % pretty(biome), 'Roblox takes no item uses until a rejoin' if game.USE_DEAD
-                      else 'None of the listed potions were found', EMBED_BAD, 'Pop')
+            self.tell('Nothing popped in %s' % pretty(biome), 'None of the listed potions were found', EMBED_BAD, 'Pop')
 
     def selector_landed(self):
         return base_biome(self.biome_now).replace(' ', '') == self.selector_biome.replace(' ', '')
@@ -2828,7 +2827,7 @@ class App:
 
     def items_due(self):
         now = time.monotonic()
-        return (not game.USE_DEAD and not rune_biome(self.biome_now, HOLD_BIOMES)
+        return (not rune_biome(self.biome_now, HOLD_BIOMES)
                 and any(now >= self.item_due.get(t, 0.0) for t in (game.BR, game.SC)))
 
     def spend_items(self):

@@ -327,10 +327,9 @@ def set_pace(base):
 
 def fresh_session():
     """Reset per-run state on Start."""
-    global _window, _said_refused, USE_DEAD, USE_GIVE_UPS
+    global _window, _said_refused
     _window = (0.0, None)
     _said_refused = False
-    USE_DEAD, USE_GIVE_UPS = False, 0
 
 
 kb = KeyboardController()
@@ -1582,6 +1581,7 @@ CLEAR_TAPS = 40          # clears the old search (aura names run to 31 chars)
 
 
 NAME_COLOURS = {SC: 'grey', BR: 'grey', 'merchant teleporter': 'gold', 'portable crack': 'gold'}
+NAME_LOOKS = {'grey': ('grey', 'white'), 'gold': ('gold',)}     # One-time Biome Randomizer is gold: never a BR
 GOLD = (30, 60)          # hue in degrees (Teleporter and Crack read 44-46)
 NAME_INK = 0.02          # share of the read area a name covers
 NAME_W, NAME_H = 0.36, 0.2   # half the read area, as a share of the slot pitch
@@ -1697,8 +1697,6 @@ def item_pass(say=print, terms=(BR, SC)):
     paced(SETTLE_S)
     used = []
     for term in terms:
-        if uses_dead(say):
-            break
         if click_use(term, say):
             used.append(term)
         else:
@@ -1879,6 +1877,9 @@ def collection_open():
     return int((line.mean(axis=1) >= 0.8).sum()) >= 3
 
 
+after_align = None       # run once after the next camera squaring (daily rewards after joining)
+
+
 def align_camera(stop=lambda: False):
     """Open and close Collection to square the camera. False if it never opened or shut."""
     if stop() or take_foreground() is None:
@@ -1897,16 +1898,44 @@ def align_camera(stop=lambda: False):
     press_point('exit_collection', settle=0.5)
     for go in range(3):
         if stop() or not collection_open():
-            return not stop()
+            break
         # below 1440p the chat covers Exit; its top-bar button hides it.
         # the last go flips it back, in case it was already hidden
         print('   Collection is still open: %sExit again' % ('chat button, then ' if go else ''))
         if go:
             press_chat()
         press_point('exit_collection', settle=0.5)
-    if collection_open():
-        print('   Collection would not shut')
+    else:
+        if collection_open():
+            print('   Collection would not shut')
+            return False
+    global after_align
+    if after_align and not stop():
+        go, after_align = after_align, None
+        go()
+    return not stop()
+
+
+TILT_STEPS, TILT_STEP = 20, 10   # 200 px down in small relative moves; the camera stops at straight down
+
+
+def tilt_up(stop=stopped):
+    """Hold right click and drag down so the camera looks down from above."""
+    w = take_foreground()
+    if w is None or stop():
         return False
+    x0, y0, cw, ch = client_rect(w)
+    move_to(x0 + cw // 2, y0 + ch // 2, 0.2)
+    button('right', True)
+    try:
+        paced(0.2)
+        for _ in range(TILT_STEPS):
+            _mouse(0x0001, dy=TILT_STEP)                 # relative move, like AHK's MouseMove 0, 10, , R
+            time.sleep(0.03)
+        paced(0.2)
+    finally:
+        button('right', False)
+    paced(0.3)
     return not stop()
 
 
@@ -1974,13 +2003,9 @@ def use_one():
 
 USE_WAIT_S = 5.0         # for the server to take one away
 USE_TRIES = 4            # Use presses per item, counting ones a cutscene or a shut Inventory ate
-DEAD_AFTER = 3           # Use presses on a picked item with nothing taken before item uses count as stopped
 BACK_S = 2.0             # wait for a cutscene to give the Inventory back before clicking it open
 LOOK_STEADY_S = 1.5      # how long a slot must stay the same before Use, so a late frame can't fake a use
-SHUTS_ON_USE = {'biome selector'}     # its own window opens and closes the Inventory
-USE_DEAD = False         # set once Roblox stops taking item uses (a refused use blocks them until a rejoin)
-USE_GIVE_UPS = 0         # uses given up after DEAD_AFTER presses; a use that takes or a rejoin clears it
-DEAD_GIVE_UPS = 2        # this many give-ups in a row = Use is dead: rejoin
+DOUBLE_USE = ('strange controller', 'biome randomizer', 'biome selector', 'merchant teleporter')     # Use clicked twice so it lands     # Use clicked twice so it lands
 _searched = None         # the last term search_item found
 SEARCH_TRIES = 3
 RESULTS_S = 2.0          # for a slow grid to show the results
@@ -2082,10 +2107,17 @@ def picked(click_slot, say, settle=0.25):
     return False
 
 
-def uses_dead(say):
-    if USE_DEAD:
-        say('  Roblox is not taking item uses since one was refused: not trying until a rejoin')
-    return USE_DEAD
+def press_use(slot, settle=0.25, halt=stopped):
+    """Pick search result `slot`, set the amount to 1, press Use. No waiting to see it taken."""
+    if halt() or not press_point('slot%d' % (slot + 1), settle=settle):
+        return False
+    use_one()
+    double = _searched in DOUBLE_USE
+    if halt() or not press_point('use', settle=0.08 if double else 0.4):
+        return False
+    if double:
+        press_point('use', settle=0.4, travel=0)
+    return not halt()
 
 
 def use_slot(slot, say, settle=0.25, halt=stopped, ours=False):
@@ -2098,10 +2130,6 @@ def use_picked(pick, look, say, settle=0.25, halt=stopped, ours=False):
     """Pick a slot, set the amount to 1, press Use. True only once look() of that slot changes.
     ours: our last pick should still be up; it is never picked again (the slot may hold another item now).
     If the Inventory shuts it is reopened, and the slot is checked before pressing Use again."""
-    global USE_DEAD, USE_GIVE_UPS
-    if uses_dead(say):
-        return False
-    misses = 0
     for go in range(USE_TRIES):
         if halt() or not reopened(halt):
             return False
@@ -2124,9 +2152,6 @@ def use_picked(pick, look, say, settle=0.25, halt=stopped, ours=False):
             return False
         taken = use_taken(look, before)
         if taken == 'gone':
-            if _searched in SHUTS_ON_USE:
-                USE_GIVE_UPS = 0
-                return True                     # its window took over, as it does when used
             seen = looks_used(look, before, halt)
             if seen is None:
                 seen = looks_used(look, before, halt)       # a cutscene then a closing window
@@ -2135,20 +2160,9 @@ def use_picked(pick, look, say, settle=0.25, halt=stopped, ours=False):
                 say('  the Inventory shut before Use took: pressing it again')
                 continue
         if taken == 'used':
-            USE_GIVE_UPS = 0                    # Use works: an earlier give-up was lost clicks, not a refusal
             return True
         if taken == 'gone':
             say('  the Inventory shut after Use and would not show again: not pressing again')
-            return False
-        misses += 1
-        if misses >= DEAD_AFTER:
-            USE_GIVE_UPS += 1
-            if USE_GIVE_UPS >= DEAD_GIVE_UPS:
-                USE_DEAD = True
-                say('  Use did nothing %d times, again: Roblox stopped taking item uses (a refused one does that '
-                    'until a rejoin)' % misses)
-            else:
-                say('  Use did nothing %d times: giving up on this one for now' % misses)
             return False
         say('  Use did nothing: setting 1 and pressing again')
     say('  Use did not take after %d tries' % USE_TRIES)
@@ -2165,7 +2179,7 @@ def click_use(term, say):
     if slot is None:
         return False
     name = 'slot%d' % (slot + 1)
-    if stopped() or not use_slot(slot, say):
+    if stopped() or not press_use(slot):
         return False
     say('used one %s (%s)' % (term, name))
     return True
@@ -2173,12 +2187,10 @@ def click_use(term, say):
 
 def search_item(term, say, halt, wait, tries=SEARCH_TRIES):
     """Type `term` in the Inventory search and return the slot to use, or None.
-    The box must read empty after clearing and show text after typing, so the keys are known to reach it.
+    The search box is double-clicked so the keys reach it.
     A wrong-looking result is typed again; the answer must read the same twice. A shut Inventory restarts it."""
     global _searched
     _searched = None
-    if uses_dead(say):
-        return None
     for go in range(tries):
         again = ': trying again' if go < tries - 1 else ': not using any'
         if halt():
@@ -2188,22 +2200,12 @@ def search_item(term, say, halt, wait, tries=SEARCH_TRIES):
             return None
         if go and not press_point('items', settle=0.3):        # a lost Items click leaves Gears up
             return None
-        if not press_point('search', settle=0.2):
+        if not press_point('search', settle=0.08) or not press_point('search', settle=0.2, travel=0):
             return None
         if not inventory_shown():
             continue
-        type_term('')
-        if not until(lambda: not search_typed(), 0.4, 2.0, wait) or not inventory_shown():
-            if halt():
-                return None
-            say('  %s: clearing the search did not take%s' % (term, again))
-            continue
-        type_term(term, clear=False)
-        if not until(search_typed, 0.6, 3.0, wait):
-            if halt():
-                return None
-            say('  %s: the search box shows no text%s' % (term, again))
-            continue
+        type_term(term)
+        wait(0.6)
         slot, colours = None, []
         end = time.monotonic() + RESULTS_S * PACE
         while not halt():
@@ -2340,17 +2342,6 @@ def name_rgb(slot):
     return tuple(np.median(c[v >= np.percentile(v, 80)], 0))
 
 
-def search_typed():
-    """Does the search box show white typed text? The empty placeholder is grey;
-    the caret and the white corner marks at its right end are ignored."""
-    import points
-    rgb = points.grab('inventorySearchContent')
-    if rgb is None:
-        return False
-    w = rgb.shape[1]
-    return int((rgb[:, w // 20:w * 85 // 100].min(-1) > 215).any(0).sum()) > 12
-
-
 def find_item(term):
     """Which search result is `term` (0, 1 or None), and what the first three slots read as.
     A third result means the search didn't take."""
@@ -2363,16 +2354,34 @@ def find_item(term):
         return None, ['no Inventory']           # a cutscene hides it; the world behind can read as a name
     pitch = math.hypot(b[0] - a[0], b[1] - a[1])
     spots = [(x - left, y - top) for x, y in (a, b, (2 * b[0] - a[0], 2 * b[1] - a[1]))]
-    colours = [name_colour(s, rgb, pitch) for s in spots]
     want = NAME_COLOURS.get(term)
     if want is None:                            # colour unknown: only a lone result is safe; dark names don't read,
+        colours = [name_colour(s, rgb, pitch) for s in spots]
         filled = [has_count(s, rgb, pitch) for s in spots]      # so go by the white 'xN' count
         return (0 if filled == [True, False, False] else None), colours
-    if colours[0] == 'empty' or colours[2] != 'empty':
-        return None, colours
-    if any(c not in (want, 'gold', 'empty') for c in colours):
-        return None, colours                    # something else is listed: old results, not this search
-    return next((i for i in (0, 1) if colours[i] == want), None), colours
+    boxes = [has_box(s, rgb, pitch) for s in spots]
+    names = [name_colour(s, rgb, pitch) for s in spots[:2]]
+    colours = ['%s %s' % ('box' if x else 'no box', n) for x, n in zip(boxes, names + [''])]
+    if not boxes[0] or boxes[2]:
+        return None, colours                    # nothing listed, or the search didn't narrow it down
+    found = [i for i in (0, 1) if boxes[i] and names[i] in NAME_LOOKS[want]]
+    if not found and not boxes[1] and names[0] == 'empty':
+        found = [0]                             # failsafe: one result whose name didn't read; a wrong colour never passes
+    return (found[0] if found else None), colours
+
+
+def has_box(centre, rgb, pitch):
+    """Is there an item box in this slot? Its four corner marks are bright; an empty slot shows only the dark panel,
+    and a neighbour's glow reaches one side at most. Read around the box's edge, clear of the name."""
+    x, y = int(centre[0]), int(centre[1])
+    a, b = int(0.30 * pitch), int(0.47 * pitch)
+    sq = rgb[max(0, y - b):y + b, max(0, x - b):x + b]
+    if sq.shape[0] < 2 * b or sq.shape[1] < 2 * b:
+        return False
+    lit = sq.max(-1) > 90
+    n = b - a
+    corners = [lit[:n, :n], lit[:n, -n:], lit[-n:, :n], lit[-n:, -n:]]
+    return sum(c.mean() >= 0.04 for c in corners) >= 3
 
 
 # ================================================================ self check (python game.py)

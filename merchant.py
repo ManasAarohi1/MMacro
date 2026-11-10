@@ -21,7 +21,7 @@ KNOWN_ITEMS = [
     "Potion of Bound", "Merchant Tracker", "Heavenly Potion",
 ]
 SLOTS = 5
-TELEPORT_S = 2.0         # after Use, until we're close enough to talk
+TELEPORT_S = 3.0         # after Use, until we're close enough to talk
 SHOP_WAIT_S = 8.0        # Shop -> dialogue slides off -> fade to black -> fade back
 MESSAGE = (0.275, 0.835, 0.725, 0.865)    # the shop's answer line: green "You purchased ...", red on errors
 TIER = re.compile(r'(?i)(?:un)?c[o0]mm[o0]n|r[ao]re|ep[il1]c|legend[ao]ry|myth[il1]c[ao]l')
@@ -137,6 +137,16 @@ def slot_item(i, names):
     return None
 
 
+why = ''                 # the step the last visit failed at, for the webhook
+
+
+def failed(reason, say):
+    global why
+    why = reason
+    say(reason)
+    return False
+
+
 def nap(seconds, halt):
     end = time.perf_counter() + seconds * game.PACE
     while time.perf_counter() < end:
@@ -155,20 +165,18 @@ def use_item(term, halt, say):
     """Search the Inventory for `term` and Use it, only if a result has the item's name colour."""
     what = term.title()
     if game.take_foreground() is None:
-        return False
+        return failed('Roblox would not come to the front', say)
     if not game.open_by_click('inventory', halt):              # retries a swallowed click
-        say('the Inventory did not open')
-        return False
-    if halt() or not points.click('inventoryItemsTab', 0.25):
-        return False
+        return not halt() and failed('The Inventory did not open', say)
+    if halt() or not points.click('inventoryItemsTab', 0.4):
+        return not halt() and failed('The Items tab could not be clicked', say)
     slot = game.search_item(term, say, halt, lambda s: nap(s, halt))
     if slot is None:
-        say('no %s used' % what)
         shut_inventory()
-        return False
-    if halt() or not game.use_slot(slot, say, 0.2, halt):
+        return not halt() and failed('No %s found in the Inventory (none left, or the search failed)' % what, say)
+    if halt() or not game.press_use(slot, 0.4, halt):
         shut_inventory()
-        return False
+        return not halt() and failed('The %s was found but Use did not take' % what, say)
     shut_inventory()
     return True
 
@@ -181,30 +189,41 @@ def teleport(halt, say):
     return not halt()
 
 
-def open_shop(halt):
-    """Talk, pick the green choice, Leave whatever dialogue is left. Three tries."""
-    for _ in range(3):
+def open_shop(halt, say=print):
+    """Talk, skip the text, click the green Open Shop choice. Slow and steady, four tries."""
+    lost = 0
+    for go in range(1, 5):
         if halt():
             return False
-        if not points.dialogue_up():                    # E again mid-dialogue would only be refused
+        if not points.dialogue_up():                    # green and red together: a glow only fakes one
             game.down('e')
-            time.sleep(0.05)
+            time.sleep(0.1)
             game.up('e')
-            if not nap(0.3, halt):
+            if not nap(1.0, halt):
                 return False
-            for _ in range(3):
-                points.click('dialogueSkipDialogue', 0.1)
-            if not nap(0.3, halt):
-                return False
-        at = points.choice('green') if points.dialogue_up() else None     # or a green aura glow would count
-        if at is not None:
-            game.click(*at, park=False)
-            if not nap(0.5, halt):
-                return False
-            if points.dialogue_up():                    # a click clears every choice at once: this one was lost
-                continue
-            return not points.leave_dialogue() or nap(0.3, halt)
-    return False
+        for _ in range(3):
+            if points.dialogue_up():
+                break                                   # choices are up: a click here can pick one
+            points.click('dialogueSkipDialogue', 0.3)
+        if not nap(0.8, halt):
+            return False
+        at = points.choice('green') if points.dialogue_up() else None
+        if at is None:
+            say('  try %d: no Open Shop choice yet' % go)
+            continue
+        game.click(*at, park=False)
+        if not nap(1.5, halt):
+            return False
+        if points.dialogue_up():                        # the click was lost
+            lost += 1
+            say('  try %d: Open Shop was clicked but stayed up' % go)
+            continue
+        points.leave_dialogue()
+        return nap(0.5, halt)
+    if lost:
+        return failed('Open Shop was clicked %d times but the shop never opened' % lost, say)
+    return failed('Pressed E 4 times but the Open Shop choice never came up (the teleport missed, '
+                  'the merchant left, or it was too far away)', say)
 
 
 def read_shop(names, halt):
@@ -376,10 +395,12 @@ def buy(slot, item, amount, names, halt, say=print):
 def collect(merchant, wanted, halt, say=print):
     """Teleport, read the shop, buy. Returns ({slot: name}, [bought]), None if the shop never opened,
     False if the teleport didn't happen."""
+    global why
+    why = ''
     say('%s arrived: using a Merchant Teleporter' % merchant)
     if not teleport(halt, say):
         return False
-    if not open_shop(halt):
+    if not open_shop(halt, say):
         say('%s\'s shop did not open' % merchant)
         return None
     wanted = {(identify(n, KNOWN_ITEMS) or n): a for n, a in wanted.items()}     # 'heavenly potion' -> Heavenly Potion

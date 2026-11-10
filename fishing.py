@@ -158,7 +158,7 @@ def cast(halt, zoom=ZOOM_OUT_S, full_check=True):
             return 'full'
         print('fishing: Fish still showing after the click (go %d of %d)' % (go, TRIES))
         fclick('fishingMinigameResultCloseButton')  # the centred window can leave Fish dead even when not seen as moved
-    return not halt() and 'dead'                    # no cast took: the button is covered or the bag is full
+    return not halt()
 
 
 def bag_full():
@@ -584,23 +584,21 @@ class Fisher:
         done = cast(halt, zoom, self.full_check)
         if done == 'full':
             return self.full_bag()
-        if done == 'dead':
-            return self.full_bag('Fish does nothing')    # a stale catch window covers it until a rejoin
-        self.after_sell = self.rejoin = False
+        self.after_sell = False
         ok = done and nap(0.5, halt)
         self.zoomed = self.zoomed or bool(ok)
         self.line_out = bool(ok)
         self.cast_at, self.idle, peak, dipped = time.monotonic(), icon_level(), 0, False
         return ok
 
-    def full_bag(self, what='inventory full'):
-        """Sell, or rejoin if it's still like this on the first cast after selling."""
+    def full_bag(self):
+        """Sell, or rejoin if it's still full on the first cast after selling."""
         self.line_out = self.at_spot = False
         if self.after_sell:
-            self.rejoin = '%s right after selling' % what
+            self.rejoin = 'inventory still full right after selling'
             self.failsafe('%s: rejoining' % self.rejoin)
         else:
-            self.failsafe('%s: selling' % what)
+            self.failsafe('inventory full: selling')
         self.since_sell = 0
         return True
 

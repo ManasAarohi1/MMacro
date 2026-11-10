@@ -32,8 +32,6 @@ def looks_like(slot, name):
 
 def use(name, want, halt, say):
     """Use `want` of potion `name`, one at a time, stopping when they run out. Returns how many were used."""
-    if game.uses_dead(say):
-        return 0
     if game.take_foreground() is None or not game.open_by_click('inventory', halt):
         say('the Inventory did not open')
         return 0
