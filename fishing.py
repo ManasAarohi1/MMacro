@@ -41,6 +41,7 @@ SEE_SHUT_S = 1.5
 TRIES = 3
 TALK_WAIT_S = 2.0
 SHOP_TRIPS = 3           # tries at reaching Flarg before fishing without selling
+ALIGN_REJOIN = 3         # failed squarings in a row before a rejoin
 SELL_CLOSE_S = 1.0       # wait after Confirm
 SELL_MAX = 100           # each Sell All clears one kind of fish
 SELL_AHEAD = 0.5         # sell half the guessed kinds left before counting again
@@ -626,6 +627,9 @@ class Fisher:
         self.zoomed = False                     # respawn resets the camera
         for trip in range(1, SHOP_TRIPS + 1):
             if not respawn(halt) or not game.align_camera(halt):
+                if game.align_fails >= ALIGN_REJOIN and not halt():
+                    self.rejoin = 'Collection would not open %d times in a row' % game.align_fails
+                    self.failsafe('%s: rejoining' % self.rejoin)
                 return False
             if not walk(self.shop_route, halt) or not nap(0.3, halt):
                 return False

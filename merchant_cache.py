@@ -48,6 +48,19 @@ def cache_found():
     return db_path() is not None
 
 
+def unreadable(path):
+    """The cache files this Windows user can't open."""
+    out = []
+    for f in (path, path + '-wal', path + '-shm'):
+        try:
+            open(f, 'rb').close()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            out.append('%s (%s)' % (os.path.basename(f), type(e).__name__))
+    return out
+
+
 def _open(path):
     """Read-only, so it can't write or create a db."""
     return sqlite3.connect('file:%s?mode=ro' % pathname2url(path), uri=True, timeout=2)

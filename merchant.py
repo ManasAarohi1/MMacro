@@ -354,7 +354,10 @@ def box_number():
 
 def buy(slot, item, amount, names, halt, say=print):
     """Pick the slot, set the amount, Purchase. Checks the panel first: a lost click would buy the last pick."""
-    if halt() or not points.click('merchantShopItem[%d]' % slot, 0.2):
+    if halt():
+        return False
+    if not points.click('merchantShopItem[%d]' % slot, 0.2):
+        say('not buying %s: its slot could not be clicked' % item)
         return False
     shown = None
     for k in range(3):
@@ -371,6 +374,7 @@ def buy(slot, item, amount, names, halt, say=print):
     n, left, retries, bought = amount, amount, 1, False     # left: still to buy, None = all of it
     while not halt():
         got = purchase(n, halt)
+        say('  %s: Purchase %s -> %s' % (item, 'max' if n is None else 'x%d' % n, got or 'no answer'))
         if got == 'good':
             bought = True
             if n == left:                           # all of it (None: Set to Max took the stock)

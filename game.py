@@ -1018,6 +1018,8 @@ def shut_by_sight():
 
 def close_inventory():
     """Close the Inventory by its X if it's up. True if it was."""
+    global _side_open
+    _side_open = None
     if take_foreground() is None or not inventory_open():
         return False
     b = window_box(INVENTORY_X)
@@ -1587,8 +1589,11 @@ NAME_INK = 0.02          # share of the read area a name covers
 NAME_W, NAME_H = 0.36, 0.2   # half the read area, as a share of the slot pitch
 
 
+INTERRUPT = None         # set during a turn: a merchant or pop stops it
+
+
 def stopped():
-    return ABORT
+    return ABORT or bool(INTERRUPT and INTERRUPT())
 
 
 def type_char(ch, hold=0.03):
@@ -1688,7 +1693,7 @@ def daily_by_clicks(halt=stopped):
 
 
 def item_pass(say=print, terms=(BR, SC)):
-    """Use one of each item in `terms`. Returns what was used."""
+    """Use one of each item in `terms` in one Inventory visit. Returns what was used."""
     if stopped():
         return []
     if not steady_front():
@@ -1696,14 +1701,21 @@ def item_pass(say=print, terms=(BR, SC)):
         return []
     paced(SETTLE_S)
     used = []
-    for term in terms:
-        if click_use(term, say):
-            used.append(term)
-        else:
-            say('%s: not used' % term)
-        if not stopped() and (window_seen() or not sees_windows()):
-            press_point('inventory', settle=0.6)     # close it again
-        close_inventory()
+    if open_by_click('inventory', stopped) and not stopped() and press_point('items', settle=0.3):
+        for term in terms:
+            if stopped():
+                break
+            slot = search_item(term, say, stopped, paced)        # reopens the Inventory if Use shut it
+            if slot is not None and not stopped() and press_use(slot):
+                say('used one %s (slot%d)' % (term, slot + 1))
+                used.append(term)
+            elif not stopped():
+                say('%s: not used' % term)
+    if INTERRUPT and INTERRUPT():
+        return used                             # left open for the merchant or pop
+    if not stopped() and (window_seen() or not sees_windows()):
+        press_point('inventory', settle=0.6)     # close it again
+    close_inventory()
     return used
 
 
@@ -1878,10 +1890,12 @@ def collection_open():
 
 
 after_align = None       # run once after the next camera squaring (daily rewards after joining)
+align_fails = 0          # failed squarings in a row
 
 
 def align_camera(stop=lambda: False):
     """Open and close Collection to square the camera. False if it never opened or shut."""
+    global after_align, align_fails
     if stop() or take_foreground() is None:
         return False
     for go in range(1, 4):
@@ -1894,7 +1908,9 @@ def align_camera(stop=lambda: False):
         x, y = cursor()
         glide(x + 60, y + 120)                  # off it so the next try hovers fresh
     else:
+        align_fails += 1
         return False
+    align_fails = 0
     press_point('exit_collection', settle=0.5)
     for go in range(3):
         if stop() or not collection_open():
@@ -1909,7 +1925,6 @@ def align_camera(stop=lambda: False):
         if collection_open():
             print('   Collection would not shut')
             return False
-    global after_align
     if after_align and not stop():
         go, after_align = after_align, None
         go()
@@ -2169,22 +2184,6 @@ def use_picked(pick, look, say, settle=0.25, halt=stopped, ours=False):
     return False
 
 
-def click_use(term, say):
-    """Inventory, Items, search, then use the result whose name has the item's colour."""
-    if not open_by_click('inventory', stopped):
-        return False
-    if stopped() or not press_point('items', settle=0.3):
-        return False
-    slot = search_item(term, say, stopped, paced)
-    if slot is None:
-        return False
-    name = 'slot%d' % (slot + 1)
-    if stopped() or not press_use(slot):
-        return False
-    say('used one %s (%s)' % (term, name))
-    return True
-
-
 def search_item(term, say, halt, wait, tries=SEARCH_TRIES):
     """Type `term` in the Inventory search and return the slot to use, or None.
     The search box is double-clicked so the keys reach it.
@@ -2272,18 +2271,25 @@ def window_seen():
     return True
 
 
+_side_open = None        # side window we opened last
+
+
 def open_by_click(name, halted=lambda: False):
     """Click a side button until its window shows (it's a toggle and cutscenes eat clicks).
-    Where windows aren't recognised, one click is trusted."""
-    close_inventory()                                   # close anything already up
+    Where windows aren't recognised, one click is trusted. Ours still up is reused."""
+    global _side_open
+    if _side_open == name and inventory_open():
+        return True
+    close_inventory()                                   # close anything else that's up
     for _ in range(OPEN_TRIES):
         if halted() or not press_point(name, settle=0.4):
             return False
-        if window_seen():
-            return True
-        paced(OPEN_WAIT)
-        if window_seen() or not sees_windows():
-            return True
+        if not window_seen():
+            paced(OPEN_WAIT)
+            if not (window_seen() or not sees_windows()):
+                continue
+        _side_open = name
+        return True
     return False
 
 

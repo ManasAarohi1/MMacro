@@ -78,7 +78,7 @@ SMALL_BUTTON = dict(bg=SUNK, fg=TEXT, activebackground=SUNK, activeforeground=AC
                     highlightthickness=1, highlightbackground=EDGE)
 
 TITLE = 'MMacro'
-VERSION = '1.1.1'
+VERSION = '1.1.2'
 RELEASE_PAGE = 'https://github.com/ManasAarohi1/MMacro/releases/latest'
 RELEASES = os.environ.get('MMACRO_UPDATE_URL') or 'https://api.github.com/repos/ManasAarohi1/MMacro/releases/latest'
 INVITE = 'https://discord.gg/oppression'
@@ -114,6 +114,8 @@ EQUIP_RETRY_S = 5 * 60                  # retry a failed equip after this
 JOIN_NONE_S = 300                       # 'nothing equipped' right after a join = title screen
 EQUIP_GAP_S = 90                        # Aura Storage at most this often (auto roll swaps fast)
 MERCHANT_STALE_S = 150                  # merchants stay ~3 min
+LATE_RESULT_S = 8                       # a reel's result window can take this long
+DAILY_UTC_S = 22 * 3600 + 60             # 22:01 GMT, when daily rewards reset
 DAILY_LATE_S = 90                       # no reset by then (nothing that resets is on): daily rewards anyway
 STRAY_EVERY_S = 20                      # look for a window left open (a cutscene hid it while it was closed)
 MERCHANT_REPEAT_S = 600                 # one post per visit (the animation replays)
@@ -147,6 +149,9 @@ def _note(tag, msg):
         pass
 
 
+CACHE_UNREADABLE = ('Roblox\'s cache (rbx-storage.db) could not be read, so merchants and the boss are not seen. Close '
+                    'Roblox, delete the rbx-storage.db files in %LOCALAPPDATA%\\Roblox (Roblox makes them again) and '
+                    'open Roblox normally, not as administrator.')
 STORE_ROBLOX = ('Merchant detection reads Roblox\'s cache (rbx-storage.db), which was not found on this PC. It works '
                 'with Roblox from roblox.com, Bloxstrap or Fishstrap.\n\nOpen Roblox once, or leave Merchant detection '
                 'off.')
@@ -246,6 +251,13 @@ def base_biome(name):
 
 def biome_colour(name):
     return BIOME_COLOURS.get(base_biome(name), EMBED_BIOME)
+
+
+def next_daily(now=None):
+    """Next 22:01 GMT in epoch seconds; any time zone."""
+    now = time.time() if now is None else now
+    t = now // 86400 * 86400 + DAILY_UTC_S
+    return t if t > now else t + 86400
 
 
 def rune_biome(name, picked):
@@ -376,11 +388,17 @@ def mention(user_id):
     return '<@%s>' % user_id if user_id else ''
 
 
-def post_biome(webhook_url, name, ping=True, server='', previous=None):
-    """@everyone only when `ping`."""
+def span(seconds):
+    """3h 12m, 47m or <1m."""
+    m = int(max(0, seconds)) // 60
+    return '%dh %dm' % divmod(m, 60) if m >= 60 else '%dm' % m if m else '<1m'
+
+
+def post_biome(webhook_url, name, ping=True, server='', running=None, here=None):
+    """@everyone only when `ping`. Run and server times when given."""
     fields = [('Private server', server_field(server), True)]
-    if previous:
-        fields.append(('Previous', pretty(previous), True))
+    if running is not None:
+        fields += [('Running', span(running), True), ('This server', span(here), True)]
     post_event(webhook_url, 'Biome Started - %s' % pretty(name), 'Found <t:%d:R>' % time.time(),
                biome_colour(name), 'Biome', fields, '@everyone' if ping else '',
                footer=False)
@@ -1734,19 +1752,25 @@ class App:
 
     def _watch_cache(self):
         """Watches Roblox's cache for merchant animations and keeps the block up."""
-        said = False
+        said = posted = False
         while not self._closing:
             try:
                 came = self.cache.poll()
-                said = False
+                said = posted = False
                 if came and self.running and self.merchant_detect:
                     for name in came:
                         self.merchant_arrived(name, 'its animation was used in Roblox\'s cache')
                 self._keep_block()
             except Exception as e:
                 if not said:
-                    note('merchant', 'Roblox\'s cache could not be read: %s: %s' % (type(e).__name__, e))
+                    path = self.cache.cache() or ''
+                    bad = merchant_cache.unreadable(path) if path else []
+                    note('merchant', 'Roblox\'s cache could not be read: %s: %s (%s%s)' % (
+                        type(e).__name__, e, path.replace(merchant_cache.LOCAL, '%LOCALAPPDATA%'), '; cannot open ' + ', '.join(bad) if bad else ''))
                     said = True
+                if not posted and self.running and self.merchant_detect:
+                    post_event(self.url, 'Merchant detection is not working', CACHE_UNREADABLE, EMBED_BAD, 'Merchant')
+                    posted = True
             time.sleep(2)
 
     def _merchant_toggled(self, *_):
@@ -1814,7 +1838,6 @@ class App:
                 if self.equip_due is None:
                     self.equip_due = max(time.monotonic(), self.equip_busy_at + EQUIP_GAP_S)
             last_aura = aura
-        previous = watcher.current
         change = watcher.feed(biome)
         if change:
             name, alert = change
@@ -1822,7 +1845,8 @@ class App:
             self.pop_biome_changed(name)
             append_history(name)
             server = self.server_link or game.load_settings().get('private_server', '')
-            post_biome(url, name, ping=alert, server=server, previous=previous)
+            times = (time.time() - self.run_wall, time.monotonic() - self.joined_at) if self.running else (None, None)
+            post_biome(url, name, ping=alert, server=server, running=times[0], here=times[1])
             self._set(biome=(pretty(name), ACCENT if alert else DIM))
         return last_aura
 
@@ -2160,6 +2184,7 @@ class App:
         seer = eden.Watcher() if self.eden_on.get() else None
         afk_due = time.monotonic() + AFK_EVERY_S
         stray_due = time.monotonic() + STRAY_EVERY_S
+        self.daily_at = next_daily()
         halt = lambda: game.ABORT or self.need_rejoin is not None
         busy = lambda: halt() or self.merchant_due is not None or self.pop_due is not None   # these drop everything
         self.fisher = fishing.Fisher(vip=bool(self.fish_vip.get()), sell_every=self.sell_every(),
@@ -2227,6 +2252,8 @@ class App:
                     and not rune_biome(self.biome_now, HOLD_BIOMES)
                     and not self.selector_landed()):
                 self.between_fish(busy, 'selector', 'Biome Selector due', self.selector_turn)
+            if time.time() >= self.daily_at and not busy():
+                self.between_fish(busy, 'daily', 'daily rewards reset', self.daily_reset_turn)
             if game.after_align and time.monotonic() >= self.daily_by and not busy():
                 game.after_align = None
                 self.claim_daily()
@@ -2392,6 +2419,7 @@ class App:
             if not self.reconnect():
                 self.tell('Roblox is not ready', capital(why), EMBED_BAD, 'Connection')
                 return False
+            self.joined_at = time.monotonic()
         return True
 
     def fit_roblox(self):
@@ -2539,6 +2567,10 @@ class App:
             self.out_since = None
             self.need_rejoin = 'not in a game for %d minutes' % (OUT_S // 60)
 
+    def daily_reset_turn(self):
+        self.daily_at = next_daily()
+        self.claim_daily()
+
     def daily_later(self):
         """Daily rewards after the first reset + camera squaring since joining: the window shows late."""
         game.after_align = self.claim_daily
@@ -2642,13 +2674,26 @@ class App:
             if not self.fisher.at_spot:                             # may have been mid-sale at Flarg
                 fishing.points.click('fishingShopCloseButton', 0.2)
                 fishing.points.leave_dialogue(skip=True)
-            elif fishing.window_state() == 'catch':
-                fishing.close_catch(halt)
-            elif self.fisher.line_out:
-                self.fisher.reel_in(halt)
+            else:
+                if self.fisher.line_out:
+                    self.fisher.reel_in(halt)
+                # the catch or Fishing Failed window can show a few seconds late
+                end = time.monotonic() + LATE_RESULT_S
+                while time.monotonic() < end and not halt():
+                    st = fishing.window_state()
+                    if st in ('catch', 'failed'):
+                        fishing.close_catch(halt)
+                        break
+                    if st == 'fish':
+                        break
+                    time.sleep(0.2)
         except Exception as e:
             note('merchant', 'reeling in failed - %s: %s' % (type(e).__name__, e))
         self.fisher.line_out = False
+
+    def dropped(self):
+        """'merchant' or 'pop' if one is waiting, else ''."""
+        return 'merchant' if self.merchant_due is not None else 'pop' if self.pop_due is not None else ''
 
     def items_turn(self, halt):
         self.between_fish(halt, 'items', 'SC/BR due', self.spend_items)
@@ -2662,9 +2707,13 @@ class App:
             return
         if self.fisher and fishing.window_state() == 'catch':
             fishing.close_catch(halt)
+        game.INTERRUPT = self.dropped
         try:
             work()
         finally:
+            game.INTERRUPT = None
+            if self.dropped():
+                note(tag, 'stopped for the %s' % self.dropped())    # an open Inventory is reused
             if self.fisher:
                 self.fisher.pause = False
                 self.fisher.recast = self.fisher.at_spot and not self.fisher.line_out
@@ -2672,7 +2721,8 @@ class App:
     def equip_turn(self):
         """Put the kept aura back on; backs off when it fails."""
         aura, say = self.equip_aura, lambda m: note('equip', m)
-        halt = lambda: game.ABORT or self.need_rejoin is not None
+        halt = lambda: (game.ABORT or self.need_rejoin is not None or self.merchant_due is not None
+                        or self.pop_due is not None)
 
         def logged(since):
             name, at = self.aura_logged             # lines from before this run don't count
@@ -2702,7 +2752,7 @@ class App:
             if self.equip_fails == 1:
                 self.tell('Could not equip %s' % aura, 'Trying again in %d minutes' % (wait // 60), EMBED_BAD, 'Aura')
         else:
-            self.equip_due = time.monotonic()           # stopped or rejoining: check again after
+            self.equip_due = time.monotonic()           # check again after
 
     def rune_biome_changed(self, name):
         """A picked biome started: a Cursed Rune Fragment is due after the set time. Any other cancels it."""
@@ -2726,6 +2776,8 @@ class App:
             used = []
             say('failed - %s: %s' % (type(e).__name__, e))
             self.close_guis()
+        if not used and self.dropped():
+            return                                      # still due
         self.rune_tries += 1
         if used:
             self.rune_due = None
@@ -2840,8 +2892,12 @@ class App:
         try:
             got = game.item_pass(say=say, terms=due)
             done = time.monotonic()                     # the cooldown starts at Use, not when the pass began
-            for t in due:
+            cut = self.dropped()
+            tried = [t for t in due if t in got or not cut]
+            for t in tried:
                 self.item_due[t] = done + (ITEM_EVERY_S[t] + ITEM_SPARE_S if t in got else ITEM_RETRY_S)
+            for t in set(due) - set(tried):
+                say('%s: left for after the %s' % (t, cut))
         except Exception as e:
             for t in due:
                 self.item_due[t] = now + ITEM_RETRY_S
@@ -2849,7 +2905,9 @@ class App:
             self.tell('Auto SC + BR failed', '`%s: %s`' % (type(e).__name__, e), EMBED_BAD, 'Auto SC + BR')
             self.close_guis()
             return True
-        missed = ', '.join(pretty(t) for t in due if t not in got)
+        if not tried:
+            return False
+        missed = ', '.join(pretty(t) for t in tried if t not in got)
         if got:
             self.tell('Used a ' + ' and a '.join(pretty(t) for t in got), missed and "%s wasn't used" % missed,
                       EMBED_INFO, 'Auto SC + BR')
@@ -2874,6 +2932,8 @@ class App:
 
     def close_guis(self):
         try:
+            if self.fisher and fishing.window_state() in ('catch', 'failed'):
+                fishing.close_catch(lambda: game.ABORT)          # it sits over the Inventory
             game.close_guis()
         except Exception as e:
             note('menus', 'closing menus failed: %s: %s' % (type(e).__name__, e))
