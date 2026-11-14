@@ -11,19 +11,22 @@ import time
 from urllib.request import pathname2url
 
 NAMES = ('Mari', 'Jester', 'Rin', 'Boss', 'Sinister P.')
-ANIMATION = b'roblox-assettypeid: 24'
 _ADDRESS = re.compile(rb'/(?:v\d+/)?sc\d+/([0-9a-f]{32})')
-# from MerchantLearner: each merchant's animation address and file cache key
+# from MerchantLearner: each merchant's asset addresses and file cache keys
 ADDRESSES = {'Mari': {'e19e08c3454fe2d8fac8d447434a7c16'},
              'Jester': {'7a41a0002e8294562cd0ac3048386152'},
              'Rin': {'6a3e15a8e4d909486bc445bdb8fe4996'},
              'Boss': {'16daaac736fd49a9bb3782f99f0b29d2', 'b602b26ec2d128fc9e9c869ad18c8cc2'},
-             'Sinister P.': set()}
+             'Sinister P.': {'2c71e2ca0bf1100136e35e13d0be62cb', '5b548b0e49c00ea267211f5d68edd81f',
+                             '699d26fb0d2f9bd7ab2a9912522783ce', '6f2200e4afaf78a44b52be2bd8bdf1b2',
+                             '8bfaac946e9e2911cb8334b8f1f30237', '971d01a7f1aa9c0430810f0d2735daf9',
+                             'd4153668107c33ab19d881f74ce35cdc', 'ec371ddec207b782654fc227e53fe48d',
+                             'f4522e8554bb80911e72139810b3abff', 'fba51d46fae18fa53e7f97c920c4ef2c'}}
 FILES = {'Mari': {'3322c570efc137a477a1e2f04bb39fe7'},
          'Jester': {'1fc3405b9963491cf03fd7b5f89b801b'},
          'Rin': {'25f70ebc3654f26af69047a7d941c859'},
          'Boss': {'741269bab3f96bb43876567e4cd50ac1', 'a8e0b2c3883e429349fa4130714abf8c'},
-         'Sinister P.': {'67273f33915c396956e4564d27bf2882'}}
+         'Sinister P.': set()}
 
 
 LOCAL = os.environ.get('LOCALAPPDATA') or os.path.expanduser(r'~\AppData\Local')
@@ -69,7 +72,7 @@ def _open(path):
 
 
 def touched(since_ms, path=None):
-    """[(address, atime ms)] of animation rows used after since_ms."""
+    """[(address, atime ms)] of asset rows used after since_ms."""
     path = path or db_path()
     if not path or not os.path.exists(path):
         return []
@@ -79,7 +82,7 @@ def touched(since_ms, path=None):
         rows = con.execute('SELECT content, atime FROM files WHERE +category = 11 AND atime > ?', (int(since_ms),))
         out = []
         for content, atime in rows:
-            if content and ANIMATION in content:
+            if content:
                 m = _ADDRESS.search(content)
                 if m:
                     out.append((m.group(1).decode(), atime))
@@ -267,6 +270,7 @@ if __name__ == '__main__':
     row(b'3', mari, 3000)
     row(b'1', idle, 3100)                               # old row used again
     assert t.poll({'Mari': {mari}}, {}) == ['Mari'] and t.poll({'Mari': {mari}}, {}) == []
+    assert Tracker(db, now_ms=500).poll({'P': {image}}, {}) == ['P']     # any kind of asset counts
     con.close()
 
     # block: existing row replaced, missing one added, every visit seen

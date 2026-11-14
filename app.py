@@ -78,7 +78,7 @@ SMALL_BUTTON = dict(bg=SUNK, fg=TEXT, activebackground=SUNK, activeforeground=AC
                     highlightthickness=1, highlightbackground=EDGE)
 
 TITLE = 'MMacro'
-VERSION = '1.1.3'
+VERSION = '1.1.4'
 RELEASE_PAGE = 'https://github.com/ManasAarohi1/MMacro/releases/latest'
 RELEASES = os.environ.get('MMACRO_UPDATE_URL') or 'https://api.github.com/repos/ManasAarohi1/MMacro/releases/latest'
 INVITE = 'https://discord.gg/oppression'
@@ -119,6 +119,8 @@ DAILY_UTC_S = 22 * 3600 + 60             # 22:01 GMT, when daily rewards reset
 DAILY_LATE_S = 90                       # no reset by then (nothing that resets is on): daily rewards anyway
 STRAY_EVERY_S = 20                      # look for a window left open (a cutscene hid it while it was closed)
 MERCHANT_REPEAT_S = 600                 # one post per visit (the animation replays)
+BOSS_BIOMES = {'Boss': 'GRAVEYARD', 'Sinister P.': 'PUMPKIN MOON'}     # posted only in these
+BOSS_EARLY_S = 5                        # seen just before its biome starts still counts
 MERCHANT_TRIES = 3                      # a shop that didn't open is tried again while the merchant is still there
 
 LOG_MAX = 4 << 20                       # trim logs.txt past this
@@ -898,6 +900,7 @@ class App:
         self.merchant_due = None    # merchant waiting to be collected
         self.merchant_at = 0.0
         self._merchant_posted = {}  # merchant: last posted
+        self._boss_seen = {}        # boss: last seen outside its biome
         self.collect = False
         self.wanted = {}
         self.collect_names = set()  # ticked under Teleport to
@@ -1744,6 +1747,12 @@ class App:
         posted = self._merchant_posted
         if time.time() - posted.get(merchant, 0.0) <= MERCHANT_REPEAT_S:
             return
+        need = BOSS_BIOMES.get(merchant)
+        if need and self.biome_now and not rune_biome(self.biome_now, {need}):
+            if time.monotonic() - self._boss_seen.get(merchant, -1e9) > BOSS_EARLY_S:
+                note('merchant', '%s seen outside %s: not posted unless %s starts' % (merchant, pretty(need), pretty(need)))
+            self._boss_seen[merchant] = time.monotonic()
+            return
         posted[merchant] = time.time()
         note('merchant', '%s arrived (%s)' % (merchant, how))
         post_merchant(url or self.url, merchant, self.server_link or game.load_settings().get('private_server', ''))
@@ -1760,7 +1769,7 @@ class App:
                 said = posted = False
                 if came and self.running and self.merchant_detect:
                     for name in came:
-                        self.merchant_arrived(name, 'its animation was used in Roblox\'s cache')
+                        self.merchant_arrived(name, 'seen in Roblox\'s cache')
                 self._keep_block()
             except Exception as e:
                 if not said:
@@ -1844,6 +1853,10 @@ class App:
             name, alert = change
             self.rune_biome_changed(name)
             self.pop_biome_changed(name)
+            for boss, at in list(self._boss_seen.items()):
+                if time.monotonic() - at <= BOSS_EARLY_S and rune_biome(name, {BOSS_BIOMES[boss]}):
+                    self.merchant_arrived(boss, 'seen just before %s started' % pretty(name))
+            self._boss_seen.clear()
             append_history(name)
             server = self.server_link or game.load_settings().get('private_server', '')
             times = (time.time() - self.run_wall, time.monotonic() - self.joined_at) if self.running else (None, None)
