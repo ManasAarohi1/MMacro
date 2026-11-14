@@ -241,7 +241,7 @@ BIOME_COLOURS = {'NORMAL': 0xB5BAC1, 'WINDY': 0x9ED9FF, 'RAINY': 0x4A7BD0, 'SNOW
                  'GRAVEYARD': 0x5E6B5A, 'PUMPKIN MOON': 0xFF7A1A, 'BLOOD RAIN': 0x8B0A1A}      # events
 PING = {'GLITCHED', 'DREAMSPACE', 'CYBERSPACE'}
 CLIP_COLOURS = ((10 ** 10, 0xFFC94D), (10 ** 9, 0xB38CFF), (10 ** 8, 0x58B9FF), (1, EMBED_GOOD))  # by rarity
-MERCHANT_COLOURS = {'Rin': 0xFF8C00, 'Mari': 0xFFD700, 'Jester': 0x9B59B6, 'Boss': 0x6A0DAD}
+MERCHANT_COLOURS = {'Rin': 0xFF8C00, 'Mari': 0xFFD700, 'Jester': 0x9B59B6, 'Boss': 0x6A0DAD, 'Sinister P.': 0x6A0DAD}
 
 
 def base_biome(name):
@@ -405,7 +405,8 @@ def post_biome(webhook_url, name, ping=True, server='', running=None, here=None)
 
 
 def post_merchant(webhook_url, name, server=''):
-    title = 'Sinister S. has spawned' if name == 'Boss' else 'Merchant Arrived - %s' % name
+    title = {'Boss': 'Sinister S. has spawned', 'Sinister P.': 'Sinister P. has spawned'}.get(
+        name, 'Merchant Arrived - %s' % name)
     post_event(webhook_url, title, 'Found <t:%d:R>' % time.time(),
                MERCHANT_COLOURS.get(name, EMBED_GOLD), 'Merchant', [('Private server', server_field(server), True)],
                footer=False)

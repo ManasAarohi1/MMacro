@@ -10,18 +10,20 @@ import threading
 import time
 from urllib.request import pathname2url
 
-NAMES = ('Mari', 'Jester', 'Rin', 'Boss')
+NAMES = ('Mari', 'Jester', 'Rin', 'Boss', 'Sinister P.')
 ANIMATION = b'roblox-assettypeid: 24'
 _ADDRESS = re.compile(rb'/(?:v\d+/)?sc\d+/([0-9a-f]{32})')
 # from MerchantLearner: each merchant's animation address and file cache key
 ADDRESSES = {'Mari': {'e19e08c3454fe2d8fac8d447434a7c16'},
              'Jester': {'7a41a0002e8294562cd0ac3048386152'},
              'Rin': {'6a3e15a8e4d909486bc445bdb8fe4996'},
-             'Boss': {'16daaac736fd49a9bb3782f99f0b29d2', 'b602b26ec2d128fc9e9c869ad18c8cc2'}}
+             'Boss': {'16daaac736fd49a9bb3782f99f0b29d2', 'b602b26ec2d128fc9e9c869ad18c8cc2'},
+             'Sinister P.': set()}
 FILES = {'Mari': {'3322c570efc137a477a1e2f04bb39fe7'},
          'Jester': {'1fc3405b9963491cf03fd7b5f89b801b'},
          'Rin': {'25f70ebc3654f26af69047a7d941c859'},
-         'Boss': {'741269bab3f96bb43876567e4cd50ac1', 'a8e0b2c3883e429349fa4130714abf8c'}}
+         'Boss': {'741269bab3f96bb43876567e4cd50ac1', 'a8e0b2c3883e429349fa4130714abf8c'},
+         'Sinister P.': {'67273f33915c396956e4564d27bf2882'}}
 
 
 LOCAL = os.environ.get('LOCALAPPDATA') or os.path.expanduser(r'~\AppData\Local')
