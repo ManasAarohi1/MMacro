@@ -1313,13 +1313,13 @@ class App:
         if self.cfg.get('pc_speed_v') != 2 and speed_of(saved) == 1.0:
             saved = 'normal'                            # old Normal -> new quicker one
         self.pc_speed = tk.DoubleVar(value=speed_of(saved))
-        self._row(box, 'PC speed', 'Slide left if your PC lags: slower mouse, longer waits. Past Fast only the mouse '
-                  'gets quicker', self._speed_slider)
+        self._row(box, 'PC speed', 'Normal is 1.0x, Fast 1.4x. Slide left if your PC lags: slower mouse, longer '
+                  'waits. Past Fast only the mouse gets quicker', self._speed_slider)
 
     def _speed_slider(self, parent):
         frame = tk.Frame(parent, bg=PANEL)
         fast = self.pc_fast = tk.DoubleVar(value=shown_speed(self.pc_speed.get()))
-        Slider(frame, fast, 0.4, 4.0, 0.1, ((0.4, 'Potato'), (1.0, 'Normal'), (1.4, 'Fast'), (4.0, 'Max'))).pack(
+        Slider(frame, fast, 0.4, 4.0, 0.1, ((0.4, 'Potato'), (1.0, ''), (1.4, ''), (4.0, 'Max'))).pack(
             side='left')
         shown = tk.Label(frame, bg=SUNK, fg=ACCENT, font=(UIB, 9), width=5, padx=4, pady=2,
                          highlightthickness=1, highlightbackground=EDGE)
