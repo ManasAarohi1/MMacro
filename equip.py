@@ -1,5 +1,4 @@
-"""Keep one aura equipped through Aura Storage.
-The Equip/Unequip button wins over the log, which can keep naming the old aura."""
+"""Keep one aura equipped through Aura Storage; the Equip/Unequip button wins over the log."""
 import difflib
 import re
 import time
@@ -23,7 +22,7 @@ norm = clipper.norm
 
 
 def resolve(text):
-    """The aura `text` means: exact, the only one containing it, else the closest. None if nothing's close."""
+    """The aura `text` means: exact, only one containing it, else closest. None if nothing is close."""
     want = norm(text)
     if not want:
         return None
@@ -39,8 +38,7 @@ def resolve(text):
 
 
 def search_term(name):
-    """What to type in search: the name without symbols if that still matches, else its longest word.
-    Symbols like - [ ] + . go in as '.' (any one)."""
+    """Search text: the name without symbols if that still matches, else its longest word."""
     name = name.replace('_', ' : ')
     for keep in (r'[^\x20-\x7e]+', r'[^A-Za-z0-9 ]+'):
         plain = re.sub(r'\s+', ' ', re.sub(keep, ' ', name)).strip()
@@ -67,11 +65,11 @@ def read_rows(rgb, small=40):
 
 
 def button():
-    """'equip', 'unequip' or None if unsure. Never press on None: on a worn aura it takes it off."""
+    """'equip', 'unequip' or None if unsure; never press on None."""
     rgb = points.grab('auraStorageAuraEquipButton')
     if rgb is None or rgb.size == 0:
         return None
-    seen = labels.equip_button(rgb)                     # by its look first, OCR only if unsure
+    seen = labels.equip_button(rgb)                     # by look first, OCR only if unsure
     if seen and lettering(rgb) in (seen, None):
         return seen
     words, ink = norm(' '.join(read(rgb))), lettering(rgb)
@@ -108,10 +106,10 @@ def shown():
     keys = {fold(n): n for n in clipper.names() if fold(n)}
     p = boxes[0]
     mid = p[1] - area[1] + 0.4 * (p[3] - p[1])      # where a one-line name is centred
-    # only the name line: "STARSCOURGE" + "[Information]" must not pass as STARSCOURGE : RADIANT
+    # only the name line, not the lines under it
     rows = [r for r in rows if (r[1] + r[2]) / 2 < p[3] - area[1] and odds_of(r[0]) is None]
     # long names wrap, so try line pairs first, near misses too
-    pairs = [(a[0] + b[0], a[1], b[2], 2) for i, a in enumerate(rows) for b in rows[i + 1:]]   # world text sits between
+    pairs = [(a[0] + b[0], a[1], b[2], 2) for i, a in enumerate(rows) for b in rows[i + 1:]]
     for tries in (pairs, [r + (1,) for r in rows]):
         tries = [(fold(t), mid - (top + bot) / 2 > 0.25 * (bot - top) / n) for t, top, bot, n in tries if fold(t)]
         for line, high in tries:
@@ -129,8 +127,7 @@ def shown():
 
 
 def odds_check(name, lines, high=False):
-    """`name`, unless it may be the start of a longer name whose 2nd line OCR lost.
-    The "1 in N" line tells them apart. Without it: None if the name sits `high`, else `name`."""
+    """`name`, unless it may be the start of a longer name; the "1 in N" line decides."""
     table = clipper.table()
     longer = [k for k in table if k != norm(name) and k.startswith(norm(name))]
     if not longer:
@@ -167,7 +164,7 @@ def nap(seconds, halt):
 
 
 def find(aura, halt, say, skip=()):
-    """Search the open Aura Storage and click cells (minus `skip`) until the panel names `aura`. The cell, or None."""
+    """Click searched cells (minus `skip`) until the panel names `aura`; the cell or None."""
     if halt() or not points.click(REGULAR, 0.2) or not points.click('auraStorageAuraSearchContent', 0.15):
         return None
     game.type_term(search_term(aura))
@@ -191,8 +188,7 @@ def shut():
 
 
 def equip(aura, halt, say=print, logged=lambda since: False, other=lambda since: None):
-    """Equip `aura` through Aura Storage. True once it's on.
-    logged(since): the log says it went on. other(since): some other aura that did, or None."""
+    """Equip `aura` through Aura Storage; True once it is on."""
     if game.take_foreground() is None:
         return False
     wrong = set()                               # cells that turned out to be another aura
@@ -203,68 +199,68 @@ def equip(aura, halt, say=print, logged=lambda since: False, other=lambda since:
             if halt():
                 return False
             shut()                              # the side button toggles, so it may be open anyway
-            say('Aura Storage did not open (go %d of %d)' % (go, TRIES))
+            say('WARN aura_storage_open_failed attempt=%d/%d' % (go, TRIES))
             continue
         cell = find(aura, halt, say, wrong)
         if cell is None:
             shut()
             if halt():
                 return False
-            say('%s not found in Aura Storage (go %d of %d)' % (aura, go, TRIES))
+            say('WARN aura_not_found aura="%s" attempt=%d/%d' % (aura, go, TRIES))
             continue
         state = button()
-        now = shown()                           # a cell click can land late: the panel read may be old
+        now = shown()                           # a cell click can land late
         if now is not None and norm(now) != norm(aura):
             wrong.add(cell)
             shut()
-            say('%s turned out to be %s (a cell click landed late) (go %d of %d)' % (cell, now, go, TRIES))
+            say('WARN aura_cell_mismatch cell=%s aura="%s" seen="%s" reason=late_click attempt=%d/%d'
+                % (cell, aura, now, go, TRIES))
             continue
         if state == 'unequip':
-            say('%s is equipped (its button says Unequip)' % aura)
+            say('equip_already aura="%s" via=button' % aura)
             shut()
             return True
         if state is None:
             on = logged(0.0)
-            say('%s: the Equip button could not be read, so it is not pressed (Roblox\'s log says it is %s; '
-                'an odd window shape does this: press F11 for a window MMacro sizes)'
-                % (aura, 'equipped' if on else 'not equipped'))
+            say('WARN equip_button_unreadable aura="%s" log_equipped=%s pressed=false hint="odd window shape, press F11"'
+                % (aura, 'true' if on else 'false'))
             shut()
             return on
         since = time.time()
         if not points.click('auraStorageAuraEquipButton', 0.1):
             shut()
             return False
-        end, how = time.perf_counter() + EQUIP_WAIT_S * game.PACE, None
+        end, how = time.perf_counter() + EQUIP_WAIT_S * game.LIMIT, None
         while time.perf_counter() < end and not halt():
             if button() == 'unequip':
-                how = 'the button now says Unequip'
+                how = 'button'
             elif logged(since):
-                how = 'Roblox\'s log says so'
+                how = 'log'
             if how:
                 break
             time.sleep(0.2)
         if how and nap(1.0, halt) and other(since):
-            say('Roblox\'s log says %s went on instead (a cell read wrong): trying the next one (go %d of %d)'
-                % (other(since), go, TRIES))
+            say('WARN equip_wrong_aura aura="%s" seen="%s" via=log attempt=%d/%d' % (aura, other(since), go, TRIES))
             wrong.add(cell)
             shut()
             continue
-        now = shown() if how else None          # clicks land in order, so the panel now names what really went on
+        now = shown() if how else None          # the panel now names what really went on
         if now is not None and norm(now) != norm(aura):
-            say('%s went on instead (a cell click landed late): trying the next one (go %d of %d)' % (now, go, TRIES))
+            say('WARN equip_wrong_aura aura="%s" seen="%s" via=panel reason=late_click attempt=%d/%d'
+                % (aura, now, go, TRIES))
             wrong.add(cell)
             shut()
             continue
         if how:
-            say('%s equipped (%s)' % (aura, how))
+            say('equip_done aura="%s" via=%s' % (aura, how))
             shut()
             return True
         if halt():
             return False
         # never press again: the same button takes it off
-        say('%s not equipped yet: its press may still land, so it is checked again later' % aura)
+        say('WARN equip_pending aura="%s" recheck=later' % aura)
         shut()
         return False
     if not halt():
-        say('%s could not be equipped after %d goes' % (aura, TRIES))
+        say('ERROR equip_failed aura="%s" attempts=%d' % (aura, TRIES))
     return False

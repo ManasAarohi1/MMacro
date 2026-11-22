@@ -1,4 +1,5 @@
 """Auto fishing: cast, wait for the bite, reel by the bar colour, close the catch, repeat."""
+import difflib
 import re
 import time
 
@@ -6,6 +7,7 @@ import numpy as np
 
 import game
 import labels
+import memmatch
 import merchant
 import points
 
@@ -28,6 +30,7 @@ DRY_CASTS = 2            # Fish doing nothing this many times = full bag
 REEL_S = 9.0             # a reel never lasts longer
 THIN = 20 / 405          # FishSol's 20 px of a 405 px bar
 RUN_TOL = 20             # zone colour drifts ~15 on bright backgrounds, the fill is ~100 off
+LOST_S = 1.5             # bar colour gone this long: lost, click slow and safe
 NO_BITE_S = 30.0        # then the failsafe takes a step
 REEL_MIN_S = 1.0
 BAR_SHOWS_S = 1.5
@@ -47,6 +50,23 @@ SELL_MAX = 100           # each Sell All clears one kind of fish
 SELL_AHEAD = 0.5         # sell half the guessed kinds left before counting again
 SLOW_STEP = 0.15         # extra wait per Sell All when the game drops some
 SLOW_MAX = 0.6
+SELL_WAIT_MIN, SELL_WAIT_MAX = 1.0, 6.0     # how long a Sell All may take to show, by how slow they've been
+SELL_MISSES = 3          # Sell Alls in a row with no change: the bag is empty
+# Fishing Shop, Buy side: centred, 0.55 of the client each way; spots as fractions of the shop
+SHOP = 0.55
+BUY_TAB = (0.476, 0.112)
+BUY_GRID = (0.305, 0.148, 0.995, 0.99)
+PRODUCT_NAME = (0.012, 0.634, 0.288, 0.725)     # the picked item's name, left panel
+PURCHASE = (0.15, 0.934)
+HEADER = (0.26, 0.22, 0.74, 0.285)              # "Confirm Purchase"
+AMOUNT_BOX = (0.649, 0.44)
+AMOUNT_TEXT = (0.515, 0.502, 0.782, 0.56)       # "250 / 1,000" or "[ Sold Out ]"
+CONFIRM = (0.649, 0.622)
+PRICE = (0.529, 0.582, 0.769, 0.661)            # the price on that button
+POPUP_X = (0.781, 0.254)
+FISH_POINTS = (0.77, 0.01, 0.925, 0.07)
+SLOT = (0.163, 0.371)                           # one item in the Buy grid, of the shop's width/height
+BUY_WAIT_S = 5.0         # for the purchase to show
 
 
 def press(key, hold=0.05):
@@ -119,7 +139,7 @@ def run_width(rgb, colour):
     """Longest run of the bar colour on any row, or None if it's not there."""
     diff = np.abs(rgb.astype(int) - np.array(colour))
     run = majority(np.all(diff <= RUN_TOL, axis=2))
-    if not (np.all(diff <= 5, axis=2) & run).any():
+    if run.sum() < 6:
         return None
     best = 0
     for row in run:
@@ -129,6 +149,41 @@ def run_width(rgb, colour):
             starts, ends = np.r_[0, gaps + 1], np.r_[gaps, idx.size - 1]
             best = max(best, int((idx[ends] - idx[starts]).max()) + 1)
     return best
+
+
+def bar_rows(bar):
+    """The bar between its two light outline lines, looked for a few px around the box; the box itself if unseen."""
+    pad = max(4, (bar[3] - bar[1]) // 2)
+    img = game.grab((bar[0], bar[1] - pad, bar[2], bar[3] + pad))
+    if img is None or img.size == 0:
+        return bar
+    on = np.flatnonzero((img.min(axis=2) >= 110).mean(axis=1) >= 0.9)
+    if on.size < 2 or on[-1] - on[0] < 0.6 * (bar[3] - bar[1]) or on[-1] - on[0] > 1.5 * (bar[3] - bar[1]):
+        return bar
+    top = bar[1] - pad
+    return bar[0], top + int(on[0]) + 1, bar[2], top + int(on[-1])
+
+
+def sample(bar, halt):
+    """The zone colour: most common colour in a full-height block where the zone starts, once two looks agree."""
+    w = bar[2] - bar[0]
+    x0, x1 = bar[0] + w * 186 // 405, bar[0] + w * 206 // 405
+    last = None
+    for _ in range(60):
+        px = game.grab((x0, bar[1], x1, bar[3])).reshape(-1, 3).astype(int)
+        hi, lo = px.max(axis=1), px.min(axis=1)
+        px = px[(lo < 200) & (hi >= 100) & (hi - lo >= 30)]          # no text, backdrop or grey fade-in
+        c = None
+        if len(px) >= 20:
+            _, which, count = np.unique(px // 12, axis=0, return_inverse=True, return_counts=True)
+            c = tuple(int(v) for v in px[which.ravel() == count.argmax()].mean(axis=0))
+        if c is not None and last is not None and max(abs(a - b) for a, b in zip(c, last)) <= 8:
+            return c
+        if halt():
+            break
+        last = c
+        time.sleep(0.02)
+    return last
 
 
 def fast_click():
@@ -157,7 +212,7 @@ def cast(halt, zoom=ZOOM_OUT_S, full_check=True):
             return not halt()                   # cast, already biting, or unreadable: carry on
         if go == 1 and st == 'fish' and full_check and bag_full():
             return 'full'
-        print('fishing: Fish still showing after the click (go %d of %d)' % (go, TRIES))
+        print('WARN cast_not_taken attempt=%d/%d' % (go, TRIES))
         fclick('fishingMinigameResultCloseButton')  # the centred window can leave Fish dead even when not seen as moved
     return not halt()
 
@@ -209,7 +264,7 @@ def bitten(within, halt, idle=0):
             dipped = True
         elif dipped:
             return True
-        if catch_bar_up():          # some sizes only flash the icon, dimmer over Remote Desktop
+        if catch_bar_up(True):      # some sizes only flash the icon, dimmer over Remote Desktop
             return True
         time.sleep(BITE_POLL_S)
     return False
@@ -304,8 +359,7 @@ def _centred_edge():
 
 
 def window_state():
-    """'catch', 'failed', 'fish', 'line' or None if unsure. None never clicks.
-    Finding the button where the bugged window puts it flips `bugged`."""
+    """'catch', 'failed', 'fish', 'line' or None if unsure; the button seen in the centred spot sets `bugged`."""
     global bugged
     head, x = points.box('fishingMinigameResultHeaderLabel'), points.box('fishingMinigameResultCloseIcon')
     shot = game.grab(x) if head and x else None             # the X sits on the window's dark body; with no window
@@ -320,16 +374,15 @@ def window_state():
         if st is not None and (not on or _centred_edge()):
             if on != bugged:
                 bugged = on
-                print('fishing: the window is %s' % ('bugged into the middle of the screen' if on else 'back in place'))
+                print('window_moved centred=%s' % ('true' if on else 'false'))
             return st
     return None
 
 
 def wait_state(want, seconds, halt):
-    """Wait for a state (or a test on one). Returns the last state seen.
-    None only counts after a few looks in a row."""
+    """Wait for a state (or a test on one); returns the last seen. None counts only after 3 looks in a row."""
     test = want if callable(want) else (lambda st: st == want)
-    end, st, blank = time.perf_counter() + seconds * game.PACE, None, 0
+    end, st, blank = time.perf_counter() + seconds * game.LIMIT, None, 0
     while time.perf_counter() < end and not halt():
         st = window_state()
         blank = blank + 1 if st is None else 0
@@ -339,13 +392,18 @@ def wait_state(want, seconds, halt):
     return st
 
 
-def catch_bar_up():
-    """Catch bar showing? Its outline is a long straight light line. None if unknown."""
+def catch_bar_up(new=False):
+    """Catch bar showing (a long light outline line)? None if unknown. `new` also wants it still empty inside."""
     b = fbox('fishingMinigameCatchBarOuter')
     if b is None:
         return None
-    rgb = game.grab((b[0], b[1] - 3, b[2], b[3] + 3))
-    return bool(((rgb.min(axis=2) >= 120).mean(axis=1) >= 0.9).any())
+    pad = max(3, b[3] - b[1])                                # a windowed Roblox can draw it a few pixels off
+    v = game.grab((b[0], b[1] - pad, b[2], b[3] + pad)).min(axis=2).astype(int)
+    on = np.flatnonzero((v >= 120).mean(axis=1) >= 0.9)
+    if not on.size:
+        return False
+    rows = v[on[0]:on[-1] + 1].mean(axis=1)
+    return not new or bool(rows.min() < rows.max() - 40)     # darker inside than its lines
 
 
 def reel(halt):
@@ -355,69 +413,77 @@ def reel(halt):
         return 0
     game.glide(*park)
     end = time.perf_counter() + BAR_SHOWS_S
-    up = catch_bar_up()
+    up = catch_bar_up(True)
     while not up and time.perf_counter() < end and not halt():
         time.sleep(0.02)
-        up = catch_bar_up()
-    if not up and window_state() == 'line':
-        return None                              # no catch bar: a click here hits Exit
-    # sample spot: over the success zone at the start, above the timer
-    mid = (bar[0] + (bar[2] - bar[0]) * 196 // 405, bar[1] + (bar[3] - bar[1]) * 5 // 21)
-    colour = pixel(mid)
-    for _ in range(60):
-        if not bad_colour(colour) or halt():
-            break
-        time.sleep(0.02)
-        colour = pixel(mid)
+        up = catch_bar_up(True)
+    if not up and wait_state(lambda st: st is not None, 1.0, halt) in ('line', 'fish'):
+        return None                              # no catch bar: a click here hits Exit (a glow can hide it a moment)
+    bar = bar_rows(bar)
+    colour = sample(bar, halt)
+    bar = bar_rows(bar)                          # again, now it has settled
     thin = max(3, round(THIN * (bar[2] - bar[0])))
     start = time.perf_counter()
     clicks, end, seen, gone = 0, start + REEL_S, False, 0
+    missing = None                               # when the colour went
     while time.perf_counter() < end and not halt():
         up = catch_bar_up()
         seen = seen or bool(up)
         gone = gone + 1 if seen and up is False else 0
         if gone >= GONE_LOOKS and time.perf_counter() - start >= REEL_MIN_S:
             break                                # done, don't click into the catch window
-        if bad_colour(colour):
+        if colour is None or bad_colour(colour):
             fast_click()                         # no real bar colour: click slow and safe
             clicks += 1
             time.sleep(0.15)
             continue
         width = run_width(game.grab(bar), colour)
+        missing = None if width is not None else missing or time.perf_counter()
+        if missing and time.perf_counter() - missing >= LOST_S:
+            fast_click()                         # lost: slow and safe, not a click every few ms
+            clicks += 1
+            time.sleep(0.15)
+            continue
         if width is None or width < thin:
             fast_click()
             clicks += 1
-            time.sleep(0.025)
         time.sleep(0.01)
     return clicks
 
 
 def close_catch(halt):
-    """Shut the catch window once its X shows. 'caught', 'lost', 'failed' or False if stopped.
-    Needs a proper click (Roblox forward, glide onto it)."""
+    """Shut the catch window once its X shows: 'caught', 'lost', 'failed', or False if stopped."""
     if not nap(CLOSE_WAIT_S, halt):
         return False
+    x = points.centre('fishingMinigameResultCloseButton')
+    if x is not None:
+        game.glide(*x)                            # wait on the X so it's clicked the moment it shows
     start, st = time.perf_counter(), None
     while not halt():
         st = window_state()                       # only 'catch' once the X is drawn
         waited = time.perf_counter() - start
-        if st in ('catch', 'failed') or waited > SEE_CATCH_S * game.PACE:
+        if st in ('catch', 'failed') or waited > SEE_CATCH_S * game.LIMIT:
             break                                 # slow PCs draw it late
-        if st is None and waited > X_SHOWS_S * game.PACE:
+        if st is None and waited > X_SHOWS_S * game.LIMIT:
             break                                 # can't read it here, assume the X is up
         time.sleep(0.05)
     if halt():
         return False
     if st in ('fish', 'line'):
         return 'lost'
+    seen = x is not None and st in ('catch', 'failed')
+    if seen and not game.click(*x, park=False, settle=0.05, travel=0):     # X seen in its spot: one click there
+        return False
     if st == 'failed':
-        return fclick('fishingMinigameResultCloseButton', 0.1) and not halt() and 'failed'
+        return (seen or fclick('fishingMinigameResultCloseButton', 0.1)) and not halt() and 'failed'
+    if seen:
+        return not halt() and 'caught'          # still up? the cast shuts it first
     for go in range(1, TRIES + 1):
         if not fclick('fishingMinigameResultCloseButton', 0.1):
             return False
         if wait_state(lambda st: st != 'catch', SEE_SHUT_S, halt) != 'catch':
             return not halt() and 'caught'
-        print('fishing: catch window still up after its X (go %d of %d)' % (go, TRIES))
+        print('WARN catch_window_still_up attempt=%d/%d' % (go, TRIES))
     return not halt() and 'caught'
 
 
@@ -430,7 +496,7 @@ def talked(halt):
             if halt():
                 return False
             points.click('dialogueSkipDialogue', 0.05)
-        end = time.perf_counter() + TALK_WAIT_S * game.PACE
+        end = time.perf_counter() + TALK_WAIT_S * game.LIMIT
         while time.perf_counter() < end:
             if halt():
                 return False
@@ -449,12 +515,25 @@ def unchanged(a, b):
     return a is not None and b is not None and a.shape == b.shape and float(np.abs(a - b).mean()) < 4
 
 
+def look(last, limit, halt):
+    """The first slot once it changes from `last`, or after `limit` s. Returns (image, seconds), or None on Stop."""
+    took = 0.0
+    while True:
+        now = first_fish()
+        if not unchanged(last, now) or took >= limit:
+            return now, took
+        if not nap(0.1, halt):
+            return None
+        took += 0.1
+
+
 _room = None                # bag size from the last full count
+_ended = None               # the first slot when the last sale ended
+_empty = None               # ...and when two sales in a row ended on it: an empty bag's look
 
 
 def read_count():
-    """Fish in the bag from 'Inventory [268 / 360]', or None.
-    A lost '/' ('268360') is split by the last known bag size."""
+    """Fish in the bag from 'Inventory [268 / 360]', or None; a lost '/' is split by the last bag size."""
     global _room
     img = points.grab('fishingShopSellTab')
     if img is None or img.size == 0:
@@ -479,7 +558,7 @@ def slower(say):
     global slow
     if slow < SLOW_MAX:
         slow = round(min(SLOW_MAX, slow + SLOW_STEP), 2)
-        say('Sell Alls went unsold: selling %.2f s slower from now on' % slow)
+        say('WARN sell_slowed extra_s=%.2f' % slow)
 
 
 def sell_all(halt):
@@ -488,6 +567,14 @@ def sell_all(halt):
         if halt() or not points.click(name, settle):         # give the confirm popup a moment
             return False
     return nap(SELL_CLOSE_S + slow, halt)
+
+
+def no_fish(halt):
+    """Empty bag: the first slot clicked twice and the panel names nothing (a name read as "00" still counts)."""
+    for _ in range(2):                                      # twice: a click just after a sale can be ignored
+        if halt() or not points.click('fishingShopSellItem[1,1]', 0.3) or re.search('[a-z0-9]', _text(PRODUCT_NAME)):
+            return False
+    return True
 
 
 def sell(halt, times=1, say=print, every=True):
@@ -517,36 +604,198 @@ def sell(halt, times=1, say=print, every=True):
             continue
         same, count, per = 0, now, (count - now) / batch
     # count unreadable: sell until the first slot stops changing; Sell all = no cap
-    rescued = False
+    global _ended, _empty
+    slowest = 0.0                                           # longest a Sell All took to show this visit
+    if start is None:
+        if unchanged(_empty, first_fish()):                 # we came with fish, so that wasn't empty
+            _empty = None
     while start is None and done < (SELL_MAX if every else max(1, times)):
         if not sell_all(halt):
             return False
         done += 1
-        now = first_fish()
-        if unchanged(last, now):
-            if not nap(1.0 + 2.0 * same, halt):             # a laggy server answers late: wait longer each time
-                return False
-            now = first_fish()                              # slow grid redraw, look again
-        same = same + 1 if unchanged(last, now) else 0
-        if same >= (3 if every else 2):
-            if not every or rescued:
-                break                                       # bag's empty
-            rescued = True                                  # a late "Sell Confirm" may still be waiting: answer it
-            if not points.click('fishingShopSellConfirmSellButton', 2.0):
-                return False
-            now = first_fish()
-            if unchanged(last, now):
-                break
-            same = 0
-        elif same == 0:
-            rescued = False
-        last = now
+        limit = min(SELL_WAIT_MAX, max(SELL_WAIT_MIN, 2 * slowest))
+        seen = look(last, limit, halt)
+        if seen is None:
+            return False
+        now, took = seen
+        if not unchanged(last, now):
+            slowest, same, last = max(slowest, took), 0, now
+            if unchanged(_empty, now):
+                break                                       # looks like an empty bag: no more Sell Alls
+            continue
+        same += 1                                           # a missed click or a slow game looks the same
+        empty = no_fish(halt)
+        if same >= SELL_MISSES or empty:
+            if every and not empty:                         # a late "Sell Confirm" may still be waiting: answer it
+                if not points.click('fishingShopSellConfirmSellButton', 0.1):
+                    return False
+                seen = look(last, limit, halt)
+                if seen is None:
+                    return False
+                if not unchanged(last, seen[0]):
+                    same, last = 0, seen[0]
+                    continue
+            if unchanged(_ended, last):
+                _empty = last
+            _ended = last
+            break                                           # bag's empty
     if start is not None:
-        say('fish in the bag: %d before selling, %d after (%d Sell All, %d reads)' % (start, count, done, reads))
+        say('sell_count before=%d after=%d sell_alls=%d reads=%d' % (start, count, done, reads))
     closed = points.click('fishingShopCloseButton', 0.2)
     if nap(0.4, halt):
         points.leave_dialogue(skip=True)                     # his dialogue outlives the shop and covers Fish
     return done if closed else False
+
+
+def _tap(spot, settle=0.3):
+    l, t = game.client_box(tuple(0.5 + SHOP * (v - 0.5) for v in spot * 2))[:2]
+    if not game.click(l, t, park=False):
+        return False
+    game.paced(settle)
+    return True
+
+
+def _lines(area):
+    """OCR of part of the shop as (squashed text, x, y) on screen."""
+    l, t, r, b = game.client_box(tuple(0.5 + SHOP * (v - 0.5) for v in area))
+    img = game.grab((l, t, r, b))
+    try:
+        result, _ = merchant.reader()(np.ascontiguousarray(img[..., ::-1]), use_cls=False)
+    except Exception:
+        return []
+    return [(re.sub(r'[^a-z0-9/.,]', '', q[1].lower()), l + (q[0][0][0] + q[0][2][0]) / 2,
+             t + (q[0][0][1] + q[0][2][1]) / 2) for q in result or []]
+
+
+def _text(area):
+    return ''.join(q[0] for q in _lines(area))
+
+
+def _like(seen, want):
+    return want in seen or difflib.SequenceMatcher(None, seen, want).ratio() >= 0.8
+
+
+def _points(area=FISH_POINTS):
+    """Fish points from the shop's top bar (or a price), or None."""
+    m = re.search(r'(\d[\d,.]*)([kmb]?)', _text(area))
+    try:
+        return float(m.group(1).replace(',', '')) * {'': 1, 'k': 1e3, 'm': 1e6, 'b': 1e9}[m.group(2)]
+    except (AttributeError, ValueError):
+        return None
+
+
+def _until(seen, seconds, halt):
+    end = time.perf_counter() + seconds * game.LIMIT
+    while time.perf_counter() < end:
+        if seen():
+            return True
+        if not nap(0.2, halt):
+            return None
+    return seen()
+
+
+def _popup():
+    """Is the Confirm Purchase window up? The screen reader often reads its title as "Confirm Purchose"."""
+    return 'confirm' in _text(HEADER)
+
+
+def _shut(halt, popup=False):
+    """Shut the Confirm Purchase window (if asked or seen), the shop, then Flarg's dialogue."""
+    if popup or _popup():
+        _tap(POPUP_X, 0.3)
+    closed = points.click('fishingShopCloseButton', 0.2)
+    if nap(0.4, halt):
+        points.leave_dialogue(skip=True)
+    return closed
+
+
+def buy(halt, item='Lucky Potion', amount=250, say=print):
+    """Buy `amount` of `item` at Flarg, his choices showing: how many, 0 if sold out or unaffordable, or False."""
+    want = re.sub(r'[^a-z0-9]', '', item.lower())
+    if not points.click('dialogueChoice[1 of 1]', 0.4):
+        return False
+    if points.leave_dialogue() and not nap(0.3, halt):
+        return False
+    if halt() or not _tap(BUY_TAB, 0.5):
+        return False
+    if _popup():                                            # left up by an earlier visit: it covers the grid
+        _tap(POPUP_X, 0.3)
+    grid = _lines(BUY_GRID)
+    hits = [q for q in grid if _like(q[0], want)]
+    if not hits:
+        say('WARN buy_item_missing item="%s" read=[%s]' % (item, ','.join(q[0] for q in grid)))
+        _shut(halt)
+        return False
+    _, x, y = hits[0]
+    w, h = (lambda b: (b[2] - b[0], b[3] - b[1]))(game.client_box((0.0, 0.0, SHOP, SHOP)))
+    if any('soldout' in q[0] and abs(q[1] - x) < SLOT[0] * w / 2 and -SLOT[1] * h / 2 < q[2] - y < SLOT[1] * h / 4
+           for q in grid):
+        say('buy_sold_out item="%s" at=grid' % item)
+        return 0 if _shut(halt) else False
+    if halt() or not game.click(int(x), int(y), park=False):
+        return False
+    game.paced(0.4)
+    if not _like(_text(PRODUCT_NAME), want):
+        say('WARN buy_pick_failed item="%s"' % item)
+        _shut(halt)
+        return False
+    for go in range(2):                                     # a lost click looks the same: once more
+        if halt() or not _tap(PURCHASE, 0.5):
+            return False
+        opened = _until(_popup, 1.5, halt)
+        if opened is None:
+            return False
+        if opened:
+            break
+    else:
+        say('WARN buy_no_confirm item="%s" maybe=sold_out' % item)
+        return 0 if _shut(halt) else False
+    if 'soldout' in _text(AMOUNT_TEXT):
+        say('buy_sold_out item="%s" at=confirm' % item)
+        return 0 if _shut(halt, True) else False
+    for go in range(2):                                     # a lost click or key shows another amount: once more
+        if halt() or not _tap(AMOUNT_BOX, 0.2):
+            return False
+        game.type_term(str(int(amount)))
+        _tap((0.5, 0.25), 0.3)                              # click off the box (on the title) so it takes the amount
+        m = re.match(r'(\d[\d,]*)/(\d[\d,]*)?', _text(AMOUNT_TEXT))       # "250 / 1,000": typed / most
+        n, most = [int(g.replace(',', '')) if g else None for g in m.groups()] if m else (0, None)
+        if most is not None and n > most:                   # "250 / 1,000" read as "2501/1,000": no more than
+            n //= 10                                        # the most can be typed, so its last digit is the /
+        if n == amount or most is not None and n == min(amount, most):
+            break
+    if n < 1:
+        say('WARN buy_amount_unread item="%s"' % item)
+        _shut(halt, True)
+        return False
+    if n != amount and (most is None or n != min(amount, most)):
+        say('WARN buy_amount_wrong shown=%d want=%d' % (n, amount))
+        _shut(halt, True)
+        return False
+    if n != amount:
+        say('WARN buy_amount_capped allowed=%d want=%d' % (n, amount))
+    before, cost = _points(), _points(PRICE)
+    if before is not None and cost is not None and cost > before and cost % n == 0:
+        say('WARN buy_no_points n=%d item="%s" cost=%d points=%d' % (n, item, cost, before))
+        return 0 if _shut(halt, True) else False            # pressing it now leaves the button dead
+    if halt() or not _tap(CONFIRM, 0.3):
+        return False
+    stop = lambda: game.ABORT                               # pressed: a merchant or pop waits for the answer,
+    gone = lambda: not _popup()                             # or the buy is forgotten and made again
+    dropped = lambda: before is not None and (_points() or before) < before
+    done = _until(lambda: dropped() or gone(), BUY_WAIT_S, stop)
+    if done and not dropped():                              # a misread title looks gone too: look again
+        done = _until(dropped, 0.5, stop) or (nap(0.3, stop) and gone())
+    if done is None or stop():
+        return False
+    after = _points()
+    if not done:
+        say('WARN buy_no_effect item="%s" points=%s maybe=no_points' % (item, '?' if before is None else '%d' % before))
+        return 0 if _shut(halt, True) else False
+    say('bought n=%d item="%s" points_before=%s points_after=%s' % (
+        n, item, '?' if before is None else '%d' % before, '?' if after is None else '%d' % after))
+    _shut(halt)
+    return n
 
 
 class Fisher:
@@ -576,6 +825,10 @@ class Fisher:
         self.dry = 0
         self.after_sell = False     # next cast is the first since selling
         self.rejoin = False         # for the app: rejoin Roblox
+        self.to_buy = None          # (item, amount) for the next trip to Flarg
+        self.bought = None          # what the last buy got
+        self.cut = lambda: ''       # for the app: why to stop the walk to Flarg ('' = keep walking)
+        self.unbarred = None        # the cast whose lit icon with no catch bar was already logged
 
     def cast(self, halt, zoom=None):
         global peak, dipped
@@ -604,10 +857,16 @@ class Fisher:
         return True
 
     def failsafe(self, what):
-        self.say(what)
+        self.say('WARN failsafe msg="%s"' % what)
         if self.report:
             self.report(what[:1].upper() + what[1:])
         points.click('fishingShopCloseButton', 0.2)          # a leftover Fishing Shop covers everything else
+        for name, shut in (('Memory Match', memmatch.shut_board), ('Daily Rewards', game.shut_daily)):
+            try:                                            # so do these, left up
+                if shut():
+                    self.say('WARN left_open_closed what="%s"' % name)
+            except Exception:
+                pass                                        # nothing to close, or it couldn't be seen
 
     def lost(self):
         """We got moved (rejoin, merchant teleport): walk back before casting."""
@@ -621,35 +880,48 @@ class Fisher:
         self.line_out = False
         return not halt()
 
-    def to_spot(self, halt):
-        """Spawn -> Flarg to sell -> fishing spot, then cast."""
-        self.say('to the fishing spot, selling at Captain Flarg on the way')
+    def to_spot(self, halt, selling=True):
+        """Spawn -> Flarg (buy what's asked for, then sell unless `selling` is False) -> fishing spot, then cast."""
+        self.say('walk_to_spot flarg=%s' % ('sell' if selling else 'buy'))
         self.zoomed = False                     # respawn resets the camera
         for trip in range(1, SHOP_TRIPS + 1):
             if not respawn(halt) or not game.align_camera(halt):
                 if game.align_fails >= ALIGN_REJOIN and not halt():
-                    self.rejoin = 'Collection would not open %d times in a row' % game.align_fails
+                    self.rejoin = 'Collection would not open or shut %d times in a row' % game.align_fails
                     self.failsafe('%s: rejoining' % self.rejoin)
                 return False
-            if not walk(self.shop_route, halt) or not nap(0.3, halt):
+            if not walk(self.shop_route, lambda: halt() or bool(self.cut())) or not nap(0.3, halt):
+                if self.cut() and not halt():
+                    self.say('walk_cut why="%s"' % self.cut())
                 return False
             if talked(halt):
-                sold = sell(halt, self.sell_amount, self.say, self.sell_all)
-                if sold is not False:              # 0 = bag was already empty
-                    self.say('sold the fish: %d Sell All, %d caught since the last sell' % (sold, self.since_sell))
-                    self.since_sell = 0
-                elif halt():
-                    return False
-                else:
-                    self.say('the sale did not go through: trying again after %d more fish' % self.sell_every
-                             if self.sell_every else 'the sale did not go through')
-                    self.since_sell = 0
+                if self.to_buy:
+                    if not self.buy_now(halt):
+                        return False
+                    if selling:                    # talk again for selling
+                        press('e')
+                        if not nap(0.3, halt):
+                            return False
+                        if not talked(halt):
+                            self.say('WARN flarg_no_choices for=sell retry=next_trip')
+                            selling = False
+                if selling:
+                    sold = sell(halt, self.sell_amount, self.say, self.sell_all)
+                    if sold is not False:          # 0 = bag was already empty
+                        self.say('sell_done sell_alls=%d caught_since=%d' % (sold, self.since_sell))
+                        self.since_sell = 0
+                    elif halt():
+                        return False
+                    else:
+                        self.say('WARN sell_failed retry_after=%d' % self.sell_every if self.sell_every
+                                 else 'WARN sell_failed')
+                        self.since_sell = 0
                 break
             if halt():
                 return False
-            self.say("Flarg's message never came up (walk %d of %d)%s" % (
-                trip, SHOP_TRIPS, ': resetting and walking again' if trip < SHOP_TRIPS else ': fishing without selling'))
-            if trip == SHOP_TRIPS:
+            self.say('WARN flarg_no_dialogue attempt=%d/%d next=%s' % (
+                trip, SHOP_TRIPS, 'walk_again' if trip < SHOP_TRIPS else 'fish_without_selling'))
+            if trip == SHOP_TRIPS and selling:
                 self.since_sell = 0             # so it retries after the next batch, not every fish
         if not nap(0.2, halt) or not walk(self.spot_route, halt):
             return False
@@ -659,8 +931,36 @@ class Fisher:
             return False
         return True
 
+    def buy_here(self, halt):
+        """Talk to Flarg again (we're beside him) and buy. False only on Stop."""
+        press('e')
+        if not nap(0.3, halt) or not talked(halt):
+            self.say('WARN flarg_no_choices for=buy retry=next_trip')
+            return not halt()
+        return self.buy_now(halt)
+
+    def buy_now(self, halt):
+        """Buy what's asked for, his choices showing. False only on Stop."""
+        item, amount = self.to_buy
+        got = self.bought = buy(halt, item, amount, self.say)
+        if halt():
+            return False
+        self.to_buy = None              # one go per ask, bought or not
+        if got is False:
+            self.say('ERROR buy_failed item="%s"' % item)
+        return True
+
+    def buy_trip(self, halt, item='Lucky Potion', amount=250):
+        """Reset, walk to Flarg, buy (no selling, the fish count carries on), back to the spot and cast."""
+        self.to_buy = (item, amount)
+        self.at_spot = self.line_out = False
+        try:
+            return self.to_spot(halt, selling=False)
+        finally:
+            self.to_buy = None                  # not left for a later sell trip: the caller asks again
+
     def foiled(self, halt, how):
-        self.say('Fishing Failed %s: casting again' % how)
+        self.say('WARN catch_failed %s' % how)
         self.line_out = False
         return True if self.pause or self.hold else self.cast(halt)
 
@@ -677,41 +977,42 @@ class Fisher:
         if bitten(wait, halt, self.idle):
             clicks = reel(halt)
             if clicks is None:
-                self.say('the bite icon lit up (%d, needs %d) but no catch bar came: still waiting' % (
-                    peak, cutoff(self.idle)))
-                return not halt()
+                if time.monotonic() - self.cast_at < NO_BITE_S:
+                    if self.cast_at != self.unbarred:       # once per cast, not every look
+                        self.unbarred = self.cast_at
+                        self.say('WARN bite_no_bar peak=%d needs=%d' % (peak, cutoff(self.idle)))
+                    return not halt()
+                self.say('WARN bite_no_bar_timeout wait_s=%d' % NO_BITE_S)
+                return self.no_bite(halt)
             landed = close_catch(halt)
             if halt() or not landed:
                 return False
             self.stage = self.dry = 0
             if landed == 'failed':
-                return self.foiled(halt, '(%d reel clicks)' % clicks)
+                return self.foiled(halt, 'reel_clicks=%d' % clicks)
             self.lost_run = self.lost_run + 1 if landed == 'lost' else 0
             if landed == 'lost' and self.lost_run >= LOST_RUN:
                 if self.lost_run == LOST_RUN:
-                    self.say('%d fish in a row with no catch window seen: it is not recognised here, so every reel '
-                             'counts as a catch' % LOST_RUN)
+                    self.say('WARN catch_window_unseen lost_run=%d reels_count_as_catch=true' % LOST_RUN)
                 fclick('fishingMinigameResultCloseButton', 0.1)
                 landed = 'caught'
             if landed == 'lost' and window_state() == 'line':
-                self.say('no catch window and the line is still out (%d reel clicks): waiting for the next bite'
-                         % clicks)
+                self.say('WARN catch_window_missing reel_clicks=%d line_out=true' % clicks)
                 return True                         # casting now would press Exit
             if landed == 'lost':
-                self.say('the fish got away (%d reel clicks): not counted' % clicks)
+                self.say('WARN catch_lost reel_clicks=%d' % clicks)
                 self.line_out = False
                 return True if self.pause or self.hold else self.cast(halt)
             self.caught += 1
             self.since_sell += 1
-            self.say('fish %d caught (%d reel clicks)%s' % (
-                self.caught, clicks, ', %d of %d before selling' % (self.since_sell, self.sell_every)
-                if self.sell_every else ''))
+            self.say('catch n=%d reel_clicks=%d%s' % (
+                self.caught, clicks, ' bag=%d/%d' % (self.since_sell, self.sell_every) if self.sell_every else ''))
             if self.hold or (self.sell_every and self.since_sell >= self.sell_every):
                 self.at_spot = self.line_out = False
                 return True
             if self.pause:
                 self.line_out = False
-                self.say('fish landed: not casting until SC/BR are used')
+                self.say('cast_paused until=sc_br')
                 return True
             return self.cast(halt)
         if halt():
@@ -719,12 +1020,12 @@ class Fisher:
         st = window_state()
         if st == 'failed':
             fclick('fishingMinigameResultCloseButton', 0.1)
-            return self.foiled(halt, 'before it was reeled')
+            return self.foiled(halt, 'when=before_reel')
         if st == 'catch':                       # the catch window came after close_catch gave up on it
             fclick('fishingMinigameResultCloseButton', 0.1)
             self.caught += 1
             self.since_sell += 1
-            self.say('fish %d caught (its window came late): shut it, casting again' % self.caught)
+            self.say('catch n=%d late=true' % self.caught)
             self.line_out = False
             return True if self.pause or self.hold else self.cast(halt)
         if st == 'fish' and nap(0.3, halt) and window_state() == 'fish':
@@ -735,16 +1036,19 @@ class Fisher:
             if self.dry > DRY_CASTS:
                 self.dry = 0
                 return self.full_bag()
-            self.say('the line is not out (Fish showing): casting again')
+            self.say('WARN line_not_out dry=%d/%d' % (self.dry, DRY_CASTS))
             return self.cast(halt)
         if time.monotonic() - self.cast_at < NO_BITE_S:
             return not halt()
+        return self.no_bite(halt)
+
+    def no_bite(self, halt):
+        """Nothing bit for NO_BITE_S: recast, walk back to the spot or sell, in turn."""
         if self.pause or self.hold:
-            self.say('no bite in %d s with %s waiting: reeling in' % (NO_BITE_S, 'SC/BR' if self.pause else 'a merchant'))
+            self.say('WARN no_bite wait_s=%d waiting_for=%s then=reel_in' % (NO_BITE_S, 'sc_br' if self.pause else 'merchant'))
             return self.reel_in(halt)
         self.stage = (self.stage + 1) % 4
-        self.say('bite icon: %d at the cast, %d at its brightest, a bite needs %d'
-                 % (self.idle, peak, cutoff(self.idle)))
+        self.say('no_bite_icon stage=%d idle=%d peak=%d needs=%d' % (self.stage, self.idle, peak, cutoff(self.idle)))
         self.failsafe({1: 'no bite in %d s: casting again' % NO_BITE_S, 3: 'no bite in %d s: casting again' % NO_BITE_S,
                        2: 'still no bite: walking back to the spot',
                        0: 'still no bite: a full bag looks like this - selling'}[self.stage])

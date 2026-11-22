@@ -1,7 +1,8 @@
 # MMacro
 
 A Windows macro for Sol's RNG with auto fishing, Eden, merchant
-detection and collection, clipping rare auras, auto reconnect and Discord webhook pings.
+detection and collection, cauldron crafting, Memory Match, Biome Selector and potion use,
+clipping rare auras, auto reconnect and Discord webhook pings.
 
 ## Run from source
 
@@ -18,8 +19,10 @@ Settings and `logs.txt` are kept in `%LOCALAPPDATA%\MMacro`.
 
 - `app.py` - the window and the run loop
 - `game.py`, `points.py` - the Roblox window, clicks, keys and where every button is (`gui_points.json`)
-- `fishing.py`, `eden.py`, `merchant.py`, `merchant_cache.py`, `equip.py`, `clipper.py` - each feature
-
+- `fishing.py`, `eden.py`, `merchant.py`, `merchant_cache.py`, `equip.py`, `clipper.py`, `crafter.py`,
+  `craftpath.py`, `memmatch.py`, `selector.py`, `potions.py` - each feature
+- `labels.py`, `labels_data.py` - reading on-screen text
+- `memory_items/` - Memory Match reward pictures
 
 
 ## License

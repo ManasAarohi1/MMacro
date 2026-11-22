@@ -17,7 +17,7 @@ import game
 FPS = 20
 BEFORE_S = 90            # the log only shows the aura after its cutscene
 AFTER_S = 30
-HEIGHTS = {'768p': 768, '1080p': 1080, '1440p': 1440, '4K': 2160}     # two minutes of frames sit in memory
+HEIGHTS = {'768p': 768, '1080p': 1080, '1440p': 1440, '4K': 2160}     # two minutes of frames in memory
 HEIGHT = 768
 QUALITY = 75
 SHOT_S = 5               # embed picture is from this long before the log line
@@ -191,7 +191,7 @@ def capture_keys(timeout=15.0, down=None):
 
 
 def press_keys(text):
-    """Press and release the combo. Always lets go of everything, a stuck Win key keeps Start open."""
+    """Press and release the combo, always letting go of every key."""
     mods, vk = parse_keys(text)
     held = []
 
@@ -308,14 +308,13 @@ class Clipper:
                         out.write(img)
                 out.release()
         except Exception as e:
-            self.say('clip failed - %s: %s' % (type(e).__name__, e))
+            self.say('ERROR clip_failed label="%s" type=%s msg="%s"' % (label, type(e).__name__, e))
             path = None
         done(path)
 
 
 class KeyClipper(Clipper):
-    """Presses the player's own recorder clip key (Game Bar, Medal, ShadowPlay...) instead.
-    Only keeps a few frames for the embed picture."""
+    """Presses the player's own recorder clip key instead; keeps a few frames for the embed picture."""
 
     def __init__(self, keys, say=print):
         parse_keys(keys)
@@ -329,8 +328,8 @@ class KeyClipper(Clipper):
         try:
             press_keys(self.keys)
         except Exception as e:
-            self.say('clip key %s not sent - %s: %s' % (self.keys, type(e).__name__, e))
+            self.say('ERROR clip_key_failed keys="%s" type=%s msg="%s"' % (self.keys, type(e).__name__, e))
             done(None)
             return
-        self.say('clip key %s pressed' % self.keys)
+        self.say('clip_key_pressed keys="%s"' % self.keys)
         done(True)

@@ -28,6 +28,7 @@ TIER = re.compile(r'(?i)(?:un)?c[o0]mm[o0]n|r[ao]re|ep[il1]c|legend[ao]ry|myth[i
 OCR_THREADS = 2          # 2 is as accurate as 4 and uses less CPU
 
 _reader = None
+_reader_used = 0.0       # when reader() was last asked for
 
 
 def wanted_from_text(text):
@@ -91,7 +92,8 @@ def _identify(text, names):
 
 
 def reader():
-    global _reader
+    global _reader, _reader_used
+    _reader_used = time.monotonic()
     if _reader is None:
         from rapidocr_onnxruntime import RapidOCR
         try:
@@ -100,6 +102,15 @@ def reader():
         except Exception:
             _reader = RapidOCR()
     return _reader
+
+
+def drop_reader(idle_s):
+    """Let the OCR models go (about 30 MB) once unused this long; the next read loads them again (0.3 s)."""
+    global _reader
+    if _reader is not None and time.monotonic() - _reader_used > idle_s:
+        _reader = None
+        return True
+    return False
 
 
 def read_lines(img):
@@ -127,8 +138,7 @@ def read_slot(i, scale=2):
 
 
 def slot_item(i, names):
-    """A slot shows the name alone, so read it whole (OCR often splits off the numeral).
-    Nothing at 2x: try 1x."""
+    """Read a slot's name whole, at 2x then 1x."""
     for scale in (2, 1):
         lines = read_slot(i, scale)
         item = identify(' '.join(lines), names) or identify_lines(lines, names)
@@ -143,7 +153,7 @@ why = ''                 # the step the last visit failed at, for the webhook
 def failed(reason, say):
     global why
     why = reason
-    say(reason)
+    say('WARN step_failed reason="%s"' % reason)
     return False
 
 
@@ -209,14 +219,14 @@ def open_shop(halt, say=print):
             return False
         at = points.choice('green') if points.dialogue_up() else None
         if at is None:
-            say('  try %d: no Open Shop choice yet' % go)
+            say('WARN open_shop_choice_missing attempt=%d/4' % go)
             continue
         game.click(*at, park=False)
         if not nap(1.5, halt):
             return False
         if points.dialogue_up():                        # the click was lost
             lost += 1
-            say('  try %d: Open Shop was clicked but stayed up' % go)
+            say('WARN open_shop_click_lost attempt=%d/4' % go)
             continue
         points.leave_dialogue()
         return nap(0.5, halt)
@@ -228,7 +238,7 @@ def open_shop(halt, say=print):
 
 def read_shop(names, halt):
     """{slot: item} once the shop has faded in, with a second look at the rest."""
-    end, k = time.perf_counter() + SHOP_WAIT_S * game.PACE, 0
+    end, k = time.perf_counter() + SHOP_WAIT_S * game.LIMIT, 0
     while not slot_item(k % SLOTS + 1, names):                  # it comes up 1-3 s after Shop
         k += 1
         if time.perf_counter() > end or not nap(0.1, halt):
@@ -286,7 +296,7 @@ def answer_band():
 
 
 def wait(test, seconds, halt):
-    end = time.perf_counter() + seconds * game.PACE
+    end = time.perf_counter() + seconds * game.LIMIT
     while not test():
         if halt() or time.perf_counter() > end:
             return False
@@ -295,8 +305,7 @@ def wait(test, seconds, halt):
 
 
 def answer(before, halt):
-    """Wait for a new answer line: 'good', 'sold', 'poor', 'limit', 'error' or None.
-    Only newly lit pixels count."""
+    """Wait for a new answer line: 'good', 'sold', 'poor', 'limit', 'error' or None."""
     _, g0, r0 = before
     start, idle = time.perf_counter(), 0
     while True:
@@ -304,8 +313,8 @@ def answer(before, halt):
         if int((g & ~g0).sum() + (r & ~r0).sum()) > 20 + 0.05 * int(g0.sum() + r0.sum()):
             break
         late = time.perf_counter() - start
-        idle = idle + 1 if late > 1.0 * game.PACE and lit('merchantShopPurchaseButton') else 0
-        if idle >= 2 or late > 6.0 * game.PACE or halt():      # no veil either: the click was lost
+        idle = idle + 1 if late > 1.0 * game.LIMIT and lit('merchantShopPurchaseButton') else 0
+        if idle >= 2 or late > 6.0 * game.LIMIT or halt():      # no veil either: the click was lost
             return None
         time.sleep(0.1)
     if not nap(0.35, halt):                                     # it grows in over 0.3 s
@@ -357,7 +366,7 @@ def buy(slot, item, amount, names, halt, say=print):
     if halt():
         return False
     if not points.click('merchantShopItem[%d]' % slot, 0.2):
-        say('not buying %s: its slot could not be clicked' % item)
+        say('WARN buy_skipped item="%s" slot=%d reason=slot_click_failed' % (item, slot))
         return False
     shown = None
     for k in range(3):
@@ -369,12 +378,12 @@ def buy(slot, item, amount, names, halt, say=print):
             break
         points.click('merchantShopItem[%d]' % slot, 0.3)
     if shown != item:
-        say('not buying %s: the shop shows %s picked' % (item, shown or 'something unreadable'))
+        say('WARN buy_skipped item="%s" slot=%d reason=wrong_pick shown="%s"' % (item, slot, shown or 'unreadable'))
         return False
     n, left, retries, bought = amount, amount, 1, False     # left: still to buy, None = all of it
     while not halt():
         got = purchase(n, halt)
-        say('  %s: Purchase %s -> %s' % (item, 'max' if n is None else 'x%d' % n, got or 'no answer'))
+        say('purchase_result item="%s" amount=%s result=%s' % (item, 'max' if n is None else n, got or 'none'))
         if got == 'good':
             bought = True
             if n == left:                           # all of it (None: Set to Max took the stock)
@@ -387,32 +396,32 @@ def buy(slot, item, amount, names, halt, say=print):
             n = min(box_number(), n or 10 ** 6) // 2      # the count must drop, whatever the box reads
             if n < 1:
                 break
-        elif got in ('sold', 'limit') or retries < 1:   # one more go for a lost click or a server error
+        elif got in ('sold', 'limit') or retries < 1:   # one more go for a lost click or an error
             break
         else:
             retries -= 1
     if not bought:
-        say('%s not bought' % item)
+        say('WARN buy_failed item="%s"' % item)
     return bought
 
 
 def collect(merchant, wanted, halt, say=print):
-    """Teleport, read the shop, buy. Returns ({slot: name}, [bought]), None if the shop never opened,
-    False if the teleport didn't happen."""
+    """Teleport, read the shop, buy: ({slot: name}, [bought]), None if no shop, False if no teleport."""
     global why
     why = ''
-    say('%s arrived: using a Merchant Teleporter' % merchant)
+    say('merchant_arrived merchant="%s" action=teleport' % merchant)
     if not teleport(halt, say):
         return False
     if not open_shop(halt, say):
-        say('%s\'s shop did not open' % merchant)
+        say('WARN shop_open_failed merchant="%s"' % merchant)
         return None
     wanted = {(identify(n, KNOWN_ITEMS) or n): a for n, a in wanted.items()}     # 'heavenly potion' -> Heavenly Potion
     names = KNOWN_ITEMS + [n for n in wanted if n not in KNOWN_ITEMS]
     found = read_shop(names, halt)
-    say('%s sells: %s' % (merchant, ', '.join('[%d] %s' % kv for kv in sorted(found.items())) or 'nothing read'))
+    say('shop_read merchant="%s" n=%d items=[%s]'
+        % (merchant, len(found), ','.join('%d="%s"' % kv for kv in sorted(found.items()))))
     if not any(item in wanted for item in found.values()):
-        say('none of the buy list is here (list: %s)' % (', '.join(wanted) or 'empty'))
+        say('buy_list_absent wanted=[%s]' % ','.join(wanted))
     bought = []
     for slot, item in sorted(found.items()):
         if item in wanted and buy(slot, item, wanted[item], names, halt, say):     # all names: a slot can be misread

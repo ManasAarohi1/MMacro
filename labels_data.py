@@ -1,4 +1,4 @@
-"""Fixed game labels as white-on-black masks at 48 px. Do not edit by hand."""
+"""Fixed on-screen labels as white-on-black masks at 48 px. Do not edit by hand."""
 REF = 48
 LABELS = {
     'BIOME SELECTOR': (

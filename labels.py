@@ -1,6 +1,4 @@
-"""Fixed game labels found by their look instead of OCR.
-Each label is a mask (labels_data.py), scaled to the label's spot and matched on edges.
-Every answer is yes, no, or None (unsure): on None the caller uses OCR."""
+"""Fixed on-screen labels found by their look; None (unsure) means the caller uses OCR."""
 import base64
 import io
 
@@ -66,8 +64,7 @@ def unlined(g, wide, tall):
 
 
 def keyed(img, colour, base):
-    """How much of `colour` each pixel holds (255 = all), on the line from `base` to it.
-    Pixels off that line count for nothing."""
+    """How much of `colour` each pixel holds (255 = all), on the line from `base` to it."""
     return lines(img, [(colour, base)])[0]
 
 
@@ -96,8 +93,7 @@ def size(name, px):
 
 
 def sizes(name, box_w, box_h, lo=LOW, hi=HIGH, extra=0.0):
-    """Font sizes `name` can show at in a box: height in [lo, hi], never wider than the box.
-    extra: more em of text on the same line."""
+    """Font sizes `name` can show at in a box, never wider than the box."""
     out, r = [], lo
     while r <= hi * 1.001:
         out.append(round(min(r * box_h, box_w / (labels_data.ADV[name] + extra)), 1))
@@ -188,8 +184,7 @@ def peaks(e, name, pxs, f, ring, n=3):
 
 
 def find(img, name, pxs, box=None, plane=None, ring=False):
-    """(score, (x0, y0, x1, y1), px) of the best spot for `name` inside box, in img pixels.
-    plane: what to match on (brightness if None). ring: match the text's 1 px outline."""
+    """(score, (x0, y0, x1, y1), px) of the best spot for `name` inside box, in img pixels."""
     x0 = y0 = 0
     if box is not None:
         x0, y0 = max(0, int(box[0])), max(0, int(box[1]))
@@ -247,7 +242,7 @@ def lit(g, name, px, f, at):
 
 
 def contrast(g, name, px, f, at):
-    """How much brighter the letters are than the gaps between them: 1 for text on a plain fill, near 0 for a flat patch."""
+    """How much brighter the letters are than the gaps between them (0 to 1)."""
     key = (name, round(px * 8), round(f * 200), 'ink')
     if key not in _cache:
         ink = resize(np.pad(resize(mask(name), px / labels_data.REF), 3), f)
@@ -273,13 +268,13 @@ def call(v):
 
 # ---------------------------------------------------------------- Aura Storage: Equip / Unequip
 def green(img):
-    """How green and bright: Equip's text runs from aaff9d to 6bff60."""
+    """How green and bright: Equip's text."""
     c = img.astype(np.float32)
     return np.clip(c[..., 1] - np.maximum(c[..., 0], c[..., 2]), 0, None) * (c[..., 1] / 255)
 
 
 def red(img):
-    """How red and bright: Unequip's text runs from ffacdf to ff5356."""
+    """How red and bright: Unequip's text."""
     c = img.astype(np.float32)
     return np.clip(c[..., 0] - c[..., 1], 0, None) * (c[..., 0] / 255)
 
@@ -339,9 +334,7 @@ def fill(colour):
 
 
 def selector(img, W, H, want=None, picked=None):
-    """The Biome Selector's fixed text in `img` (centred on the screen) as [(text, (x0, y0, x1, y1))].
-    [] if surely not up, None if unsure or if `want` can't be called either way.
-    picked: the Drive just clicked; the window takes on its colours."""
+    """Biome Selector fixed text in `img` as [(text, box)]; [] if surely not up, None if unsure."""
     if img is None or img.size == 0:
         return None
     h = min(0.38 * H, 0.38 * W / 1.75)

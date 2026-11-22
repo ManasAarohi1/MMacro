@@ -1,6 +1,4 @@
-"""Merchant detection: watch rbx-storage.db for a merchant's animation being used.
-Loaded animations stay in memory, so their files are blocked to see every visit.
-The block is removed when detection stops."""
+"""Merchant detection: watch rbx-storage.db for a merchant's animation being used."""
 import glob
 import os
 import re
@@ -12,7 +10,7 @@ from urllib.request import pathname2url
 
 NAMES = ('Mari', 'Jester', 'Rin', 'Boss', 'Sinister P.')
 _ADDRESS = re.compile(rb'/(?:v\d+/)?sc\d+/([0-9a-f]{32})')
-# from MerchantLearner: each merchant's asset addresses and file cache keys
+# each merchant's learned addresses and file cache keys
 ADDRESSES = {'Mari': {'e19e08c3454fe2d8fac8d447434a7c16'},
              'Jester': {'7a41a0002e8294562cd0ac3048386152'},
              'Rin': {'6a3e15a8e4d909486bc445bdb8fe4996'},
@@ -298,4 +296,4 @@ if __name__ == '__main__':
     assert unblock({k1, k2}, db) == 2 and reads({k1, k2}, db) == {}
     con.close()
     assert block({k1}, os.path.join(d, 'missing.db')) == {} and not os.path.exists(os.path.join(d, 'missing.db'))
-    print('merchant cache self check OK')
+    print('selfcheck_ok')

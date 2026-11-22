@@ -1,5 +1,4 @@
-"""Biome Selector: use it from the Inventory, click the picked biome's Drive, then Confirm.
-Only unlocked Drives are listed, so the Drive is found by name."""
+"""Biome Selector: use it from the Inventory, click the picked biome's Drive, then Confirm."""
 import difflib
 import re
 import time
@@ -16,23 +15,25 @@ TERM = 'biome selector'
 DRIVES = {'STARFALL': 'Radiant Star Drive', 'HELL': 'Infernal Flame Drive', 'NULL': 'Unknown Void Drive',
           'CORRUPTION': 'Corrupt Ruin Drive', 'SAND STORM': 'Golden Dune Drive', 'SNOWY': 'Chilling Frost Drive',
           'RAINY': 'Abyss Curse Drive', 'WINDY': 'Raging Gale Drive', 'HEAVEN': 'Angelic Hymn Drive'}   # list order
-COLOURS = {'Radiant Star Drive': (28, 115, 255), 'Infernal Flame Drive': (255, 55, 55),     # each Drive's row border
-           'Unknown Void Drive': (255, 255, 255), 'Corrupt Ruin Drive': (151, 46, 255),    # is drawn in it, and so is
-           'Golden Dune Drive': (255, 188, 134), 'Chilling Frost Drive': (158, 236, 255),  # Confirm's once it's picked
+COLOURS = {'Radiant Star Drive': (28, 115, 255), 'Infernal Flame Drive': (255, 55, 55),     # row border, and Confirm's
+           'Unknown Void Drive': (255, 255, 255), 'Corrupt Ruin Drive': (151, 46, 255),    # once picked
+           'Golden Dune Drive': (255, 188, 134), 'Chilling Frost Drive': (158, 236, 255),
            'Abyss Curse Drive': (88, 155, 255), 'Raging Gale Drive': (138, 255, 189),
            'Angelic Hymn Drive': (255, 206, 128)}
 COLOUR_TOL = 12          # Golden Dune and Angelic Hymn are only 18 apart
 EVERY_S = 60 * 60
-RECHARGE_S = 3600        # its "RECHARGING... n%" counts down from an hour
-AREA = (0.27, 0.26, 0.73, 0.74)     # the window's spot on the client, with room for its bobbing
-OPEN_S = 3.5             # it types its title in and adds the Drives one by one
+RECHARGE_S = 3600        # "RECHARGING... n%" counts down from an hour
+AREA = (0.27, 0.26, 0.73, 0.74)     # window area on the client, with room to bob
+OPEN_S = 3.5             # title types in, Drives appear one by one
 CONFIRM_S = 1.5          # "Are you sure?" types in, then Confirm grows in
-APPLY_S = 9.0            # request animation, then the window closes itself
+APPLY_S = 9.0            # animation, then the window closes itself
+LATE_S = (4.0, 4.0, 4.0)  # lag keeps it up longer; a refusal keeps it up for good
+NEAR_S = 5 * 60          # a recharge this close to done is read again in case of a misread digit
 SCROLLS = 3              # the last Drives sit past the bottom of the list
-OCR_ROWS = 700           # small screens are scaled up to this many rows first: Drive names get tiny
+OCR_ROWS = 700           # small screens are scaled up to this many rows for OCR
 REACH = 0.025            # largest bob + shake, as a share of the screen height
 
-_ref = None              # (screen box, grey title picture, how far it can move) from the last read
+_ref = None              # (screen box, title edges, reach) from the last read
 
 
 def squash(text):
@@ -40,14 +41,13 @@ def squash(text):
 
 
 def edges(img):
-    """Row-to-row change of the brightest channel: the title's letters and borders stand out over the see-through bar."""
+    """Row-to-row change of the brightest channel."""
     g = img.max(axis=2).astype(np.float32)
     return np.abs(np.diff(g, axis=0, prepend=g[:1]))
 
 
 def read(want=None, picked=None):
-    """Text rows in the window's area as (text, x, y) on screen. Keeps the title's picture to follow the bob.
-    Fixed words are found by look; OCR reads it all only when unsure."""
+    """Text rows in the window area as (text, x, y) on screen; keeps the title to follow the bob."""
     global _ref
     l, t, r, b = game.client_box(AREA)
     img = game.grab((l, t, r, b))
@@ -65,7 +65,7 @@ def read(want=None, picked=None):
     title = [q for q in lines if squash(q[0]) == 'biomeselector']
     if title:
         x, y, W, H = title[0][1] - l, title[0][2] - t, (r - l) / 0.46, (b - t) / 0.48
-        hy, hx = int(0.02 * H) + 2, int(0.45 * 1.75 * min(0.38 * H, 0.38 * W / 1.75))   # the whole title bar
+        hy, hx = int(0.02 * H) + 2, int(0.45 * 1.75 * min(0.38 * H, 0.38 * W / 1.75))   # whole title bar
         hx = min(hx, x, img.shape[1] - x)
         if hy <= y < img.shape[0] - hy and hx > 20:
             _ref = ((l + x - hx, t + y - hy, l + x + hx, t + y + hy), edges(img[y - hy:y + hy, x - hx:x + hx]),
@@ -74,7 +74,7 @@ def read(want=None, picked=None):
 
 
 def seen(img, left, top, want=None, picked=None):
-    """The window's fixed words as read() gives them, with RECHARGING's number from OCR. None if unsure."""
+    """Fixed words as read() gives them, RECHARGING's number by OCR. None if unsure."""
     cl, ct, cr, cb = game.client_box((0.0, 0.0, 1.0, 1.0))
     found = labels.selector(img, cr - cl, cb - ct, want, picked)
     if found is None:
@@ -91,7 +91,7 @@ def seen(img, left, top, want=None, picked=None):
 
 def percent(img, x0, y0, x1, y1):
     """'RECHARGING... n%' from OCR of the number. None if OCR missed the '%'."""
-    adv, h = (x1 - x0) / 13.5, y1 - y0                       # 13 letters of RobotoMono, all as wide
+    adv, h = (x1 - x0) / 13.5, y1 - y0                       # 13 letters, all as wide
     crop = img[max(0, int(y0 - 0.3 * h)):int(y1 + 0.3 * h), max(0, int(x1 - 0.5 * adv)):int(x1 + 5.5 * adv)]
     if crop.size == 0:
         return None
@@ -104,7 +104,7 @@ def percent(img, x0, y0, x1, y1):
 
 
 def drift():
-    """Pixels the window has moved since the last read: where the title's picture is now."""
+    """Pixels the window has moved since the last read."""
     if _ref is None:
         return 0
     (l, t, r, b), want, reach = _ref
@@ -153,7 +153,7 @@ def locate(colour, near=None, cols=None):
 
 
 def press(x, y, colour, cols=None):
-    """Click the `colour`-bordered box nearest y, found again on arrival. Without the colour, follow the title."""
+    """Click the `colour`-bordered box nearest y, else follow the title."""
     if locate(colour, y, cols) is None:
         return aim(x, y)
     if game.take_foreground() is None:
@@ -167,7 +167,7 @@ def press(x, y, colour, cols=None):
 
 
 def aim(x, y):
-    """Click what was at (x, y) in the last read. The window bobs, so: measure drift, glide, measure, nudge, press."""
+    """Click what was at (x, y) in the last read, corrected for the bob."""
     if game.take_foreground() is None:
         return False
     game.glide(x, y + drift(), settle=0.05)
@@ -179,7 +179,7 @@ def aim(x, y):
 
 
 def rows(result, left=0, top=0):
-    """OCR pieces joined into rows: it reads 'Raging Gale Drive' as 'Raging' and 'GaleDrive'."""
+    """OCR pieces joined into rows."""
     pieces = sorted(((min(p[0] for p in b), max(p[0] for p in b), min(p[1] for p in b), max(p[1] for p in b), text)
                      for b, text, _ in result), key=lambda q: (q[2] + q[3]) / 2)
     out = []
@@ -226,29 +226,36 @@ def close(lines=()):
     x, y = (b[0] + b[2]) // 2, (b[1] + b[3]) // 2
     title = [l for l in lines if squash(l[0]) == 'biomeselector']
     if title and abs(title[0][2] - y) < (b[3] - b[1]) * 1.5:
-        aim(x, title[0][2])                             # where the window sat in that read, plus its drift since
+        aim(x, title[0][2])
     else:
         game.click(x, y, park=False)
     game.paced(0.3)
 
 
 def shut():
-    """Close the window if it's up. Left up, it covers the Inventory and every later item use fails."""
+    """Close the window if it is up (True); left up it covers the Inventory."""
     lines = read()
     if status(lines)[0]:
         close(lines)
+        return True
+    return False
+
+
+def cancel():
+    """Click where Cancel sits under "Are you sure?"."""
+    (lx, ly, lw, lh), _ = list_box()
+    aim(int(lx + 0.73 * lw), int(ly + 0.7 * lh))
 
 
 def scroll(at, notches):
     game.move_to(*at)
-    for _ in range(abs(notches)):                       # one notch at a time, so the end of the list stays in view
+    for _ in range(abs(notches)):                       # one notch at a time
         game._mouse(0x0800, data=-120 if notches > 0 else 120)
         game.paced(0.05)
 
 
 def use(biome, halt, say):
-    """Select `biome` (a DRIVES key). Returns (outcome, wait): 'used', 'recharging' (wait = seconds left),
-    'unstable', 'refused', 'no drive', 'no selector' or 'stopped'."""
+    """Select `biome` (a DRIVES key); returns (outcome, seconds left or None)."""
     drive = DRIVES[biome]
     if not merchant.use_item(TERM, halt, say):
         return ('stopped' if halt() else 'no selector'), None
@@ -261,20 +268,38 @@ def use(biome, halt, say):
         state, wait = status(lines)
         if state:
             break
+    for _ in range(2):
+        if state != 'recharging' or wait > NEAR_S:
+            break
+        if not merchant.nap(1.0, halt):
+            shut()
+            return 'stopped', None
+        again = status(read(drive))
+        if again[0] == 'recharging':
+            state, wait = again[0], max(wait, again[1])
+            if again[1] <= NEAR_S:
+                break
     if state is None:
-        say('the Biome Selector window did not show (read: %s)' % (' | '.join(t for t, _, _ in lines)[:200] or 'nothing'))
+        say('WARN selector_window_missing read="%s"' % ' | '.join(t for t, _, _ in lines)[:200])
         return 'no selector', None
     if state != 'ready':
-        say('Biome Selector %s%s: closing it' % (state, ' (%d min left)' % (wait // 60) if wait else ''))
+        say('selector_not_ready state=%s wait_s=%d' % (state, wait or 0))
         close(lines)
         return state, wait
     colour = COLOURS[drive]
     (lx, ly, lw, lh), _ = list_box()
+    if find(lines, 'Confirm') or not any(find(lines, d) for d in DRIVES.values()):  # old "Are you sure?" hides the Drives
+        say('WARN selector_confirm_pending action=cancel')
+        cancel()
+        if not merchant.nap(CONFIRM_S, halt):
+            shut()
+            return 'stopped', None
+        lines = read(drive)
     hit = find(lines, drive)
-    if hit is None and locate(colour) is not None:          # OCR missed it but its colour is in view
+    if hit is None and locate(colour) is not None:          # OCR missed it, colour in view
         hit = (drive, int(lx + lw / 2), int(locate(colour)))
-    at = None
-    for step in [1] * SCROLLS + [-3 * SCROLLS]:         # down a notch at a time, then back to the top for a last look
+    at, seen = None, [t for t, _, _ in lines if 'rive' in t]
+    for step in [1] * SCROLLS + [-3 * SCROLLS]:         # down, then back to the top
         if hit is not None:
             break
         named = [q for q in lines if 'drive' in q[0].lower() and not q[0].lstrip('[').lower().startswith('sys')]
@@ -286,36 +311,46 @@ def use(biome, halt, say):
             shut()
             return 'stopped', None
         lines = read(drive)
+        seen += [t for t, _, _ in lines if 'rive' in t and t not in seen]
         hit = find(lines, drive)
         if hit is None and locate(colour) is not None:
             hit = (drive, int(lx + lw / 2), int(locate(colour)))
     if hit is None:
-        say('no %s in the Biome Selector (read: %s)' % (drive, ', '.join(t for t, _, _ in lines if 'rive' in t) or 'no Drives'))
+        say('WARN selector_drive_missing drive="%s" seen=[%s]' % (drive, ','.join(seen)))
         close(lines)
         return 'no drive', None
     if halt() or not press(hit[1], hit[2], colour):
         shut()
         return 'stopped', None
-    if not merchant.nap(CONFIRM_S, halt):
-        shut()
-        return 'stopped', None
-    lines = read('Confirm', drive)
-    ok = find(lines, 'Confirm')
     left = (lx + lw * 0.15, lx + lw * 0.49)                 # Confirm is the left one of the pair
-    if ok is None and locate(colour, ly + 0.7 * lh, left) is not None:
-        ok = ('Confirm', int(lx + lw * 0.32), int(ly + 0.7 * lh))
+    ok = None
+    for _ in range(3):                                      # slower when Roblox lags
+        if not merchant.nap(CONFIRM_S, halt):
+            shut()
+            return 'stopped', None
+        lines = read('Confirm', drive)
+        ok = find(lines, 'Confirm')
+        if ok is None and locate(colour, ly + 0.7 * lh, left) is not None:
+            ok = ('Confirm', int(lx + lw * 0.32), int(ly + 0.7 * lh))
+        if ok is not None:
+            break
     if ok is None:
-        say('picked %s but no Confirm showed' % drive)
+        say('WARN selector_confirm_missing drive="%s" action=cancel' % drive)
+        cancel()
+        merchant.nap(CONFIRM_S, halt)
         close(lines)
         return 'refused', None
     press(ok[1], ok[2], colour, left)
-    if not merchant.nap(APPLY_S, halt):
-        shut()                                          # a refusal leaves it up
-        return 'stopped', None
-    lines = read(picked=drive)
-    if status(lines)[0]:                                # a rejected use leaves the window up
-        say("the server refused it (its 20 min cooldown, or no %s left?): closing the Biome Selector" % drive)
+    for s in (APPLY_S,) + LATE_S:
+        if not merchant.nap(s, halt):
+            shut()
+            return 'stopped', None
+        lines = read(picked=drive)
+        if not status(lines)[0]:
+            break
+    else:                                               # a rejected use leaves the window up
+        say('WARN selector_use_refused drive="%s"' % drive)
         close(lines)
         return 'refused', None
-    say('selected %s (%s)' % (biome.title(), drive))
+    say('selector_used biome="%s" drive="%s"' % (biome.title(), drive))
     return 'used', None

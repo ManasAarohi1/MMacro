@@ -129,4 +129,4 @@ if __name__ == '__main__':
     for _, how, key in PATH:
         (held.add if how == 'down' else held.discard)(key)
     assert not held and PATH == sorted(PATH, key=lambda e: e[0]), 'PATH leaves a key held or goes back in time'
-    print('eden self check: Eden found when drawn, not on black; every path key can be pressed')
+    print('self_check_ok found_drawn=true found_black=false path_keys=ok')

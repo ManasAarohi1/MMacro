@@ -46,14 +46,14 @@ def _lerp(xs, ys, x):
 
 
 def _bar_box(name, ow, oh):
-    """The fishing bar at an unstored size. It's placed by width, so plain stretching misses the icon."""
+    """Fishing bar box at an unstored size; it is placed by width."""
     full = sorted(s for s in _sizes() if abs(s[0] / s[1] - 16 / 9) < 0.01)
     rows = [(w, h) + tuple(_sizes()[(w, h)][name]) for w, h in full]
     ws = [r[0] for r in rows]
     bw = _lerp(ws, [r[4] for r in rows], ow)
     bh = _lerp(ws, [r[5] for r in rows], ow)
     cx = ow / 2 + _lerp(ws, [l + a / 2 - w / 2 for w, h, l, t, a, b in rows], ow)
-    cy = 0.797 * oh - _lerp(ws, [0.797 * h - t - b / 2 for w, h, l, t, a, b in rows], ow)   # bottom sits at 0.797 of the height
+    cy = 0.797 * oh - _lerp(ws, [0.797 * h - t - b / 2 for w, h, l, t, a, b in rows], ow)   # bottom at 0.797 of height
     return cx - bw / 2, cy - bh / 2, bw, bh
 
 
@@ -67,7 +67,7 @@ def _result_box(name, ow, oh, size):
 
 def box(name):
     """(left, top, right, bottom) on screen, or None with no Roblox window."""
-    w = game.roblox_window()                    # costs ~8 ms and fishing calls this a lot
+    w = game.roblox_window()
     if w is None:
         return None
     x0, y0, cw, ch = game.client_rect(w)
@@ -141,31 +141,30 @@ def choice(colour):
 
 
 def dialogue_up():
-    """Both green and red showing (an aura only ever fakes one colour)."""
+    """Both green and red choices showing."""
     return choice('green') is not None and choice('red') is not None
 
 
 def leave_dialogue(tries=3, gap=0.3, skip=False):
-    """Press Leave until the dialogue's gone. True if there was one.
-    `skip` clicks "Click to skip" first; only use it with no shop open."""
+    """Press Leave until the dialogue is gone; `skip` clicks "Click to skip" first (no shop open)."""
     pressed = False
     for n in range(tries):
-        at = choice('red')
+        at = choice('red') if dialogue_up() else None       # red alone is an aura or a biome, not Leave
         if at is None:
             if pressed:
-                print('dialogue: gone after %d go(es)' % n)
+                print('dialogue_gone presses=%d' % n)
             break
         if skip:
             click('dialogueSkipDialogue', 0.2)
-            at = choice('red')
+            at = choice('red') if dialogue_up() else None
             if at is None:
-                print('dialogue: gone after "Click to skip"')
+                print('dialogue_gone via=skip')
                 return True
-        print('dialogue: Leave seen at %d,%d - pressing it (go %d)' % (at[0], at[1], n + 1))
+        print('dialogue_leave_press x=%d y=%d attempt=%d/%d' % (at[0], at[1], n + 1, tries))
         game.click(*at, park=False)
         pressed = True
         time.sleep(gap)
     else:
-        if pressed and choice('red') is not None:
-            print('dialogue: Leave still up after %d goes' % tries)
+        if pressed and dialogue_up():
+            print('WARN dialogue_leave_stuck n=%d' % tries)
     return pressed
