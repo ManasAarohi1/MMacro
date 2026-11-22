@@ -14,7 +14,7 @@ ROUTE = [
          (29.8963, 'down', 'a'), (30.6402, 'up', 'a'), (30.8865, 'down', 'f'), (30.9733, 'up', 'f'),
 ]
 
-# Spawn -> Memory Match stand: W+A into the fishing shop's corner, short S, D to the stand, W; no VIP = longer D
+# Spawn -> Memory Match stand; no VIP = longer D
 MEMORY = [(0.0, 'down', 'w'), (0.8, 'down', 'a'), (9.0, 'up', 'a'), (9.0, 'up', 'w'), (9.2, 'down', 's'),
           (9.35, 'up', 's'), (9.45, 'down', 'd'), (13.81, 'up', 'd'), (13.91, 'down', 'w'), (14.71, 'up', 'w')]
 MEMORY_FREE = [(0.0, 'down', 'w'), (0.8, 'down', 'a'), (9.0, 'up', 'a'), (9.0, 'up', 'w'), (9.2, 'down', 's'),

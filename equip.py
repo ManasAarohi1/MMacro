@@ -12,8 +12,8 @@ import labels
 import merchant
 import points
 
-TRIES = 3               # searches before giving up
-EQUIP_WAIT_S = 10.0     # wait for Unequip (or the log) after Equip; never press twice
+TRIES = 3
+EQUIP_WAIT_S = 10.0     # after Equip; never press twice
 CELLS = ['auraStorageAuraCell[1,%d]' % c for c in range(1, 9)] + ['auraStorageAuraCell[2,%d]' % c for c in range(1, 9)]
 REGULAR = 'auraStorageAuraRegularTab'
 NAME_AREA = ('auraStorageAuraSelectedPreview', 'auraStorageAuraInfoPanel')
@@ -84,7 +84,7 @@ def lettering(rgb):
     """Green text 'equip', red 'unequip', else None."""
     px = rgb.reshape(-1, 3).astype(int)
     lit = px.max(-1)
-    text = px[lit > np.median(lit) + 40]                # text is much brighter than the fill
+    text = px[lit > np.median(lit) + 40]                # text is brighter than the fill
     if len(text) < 0.02 * len(px):
         return None
     r, g, b = text.mean(0)
@@ -105,10 +105,9 @@ def shown():
     lines = [t for t, _, _ in rows]
     keys = {fold(n): n for n in clipper.names() if fold(n)}
     p = boxes[0]
-    mid = p[1] - area[1] + 0.4 * (p[3] - p[1])      # where a one-line name is centred
-    # only the name line, not the lines under it
+    mid = p[1] - area[1] + 0.4 * (p[3] - p[1])      # centre of a one-line name
     rows = [r for r in rows if (r[1] + r[2]) / 2 < p[3] - area[1] and odds_of(r[0]) is None]
-    # long names wrap, so try line pairs first, near misses too
+    # long names wrap: try line pairs, near misses too
     pairs = [(a[0] + b[0], a[1], b[2], 2) for i, a in enumerate(rows) for b in rows[i + 1:]]
     for tries in (pairs, [r + (1,) for r in rows]):
         tries = [(fold(t), mid - (top + bot) / 2 > 0.25 * (bot - top) / n) for t, top, bot, n in tries if fold(t)]
@@ -119,9 +118,9 @@ def shown():
             close = difflib.get_close_matches(line, list(keys), n=1, cutoff=0.8)
             if close:
                 return odds_check(keys[close[0]], lines, high)
-    for t, _, _ in rows:                        # world text behind the panel can join in
+    for t, _, _ in rows:                        # world text can join in
         inside = [k for k in keys if len(k) >= 4 and k in fold(t)]
-        if inside:                              # the rest may be a misread longer name: odds decide
+        if inside:                              # may be a misread longer name: odds decide
             return odds_check(keys[max(inside, key=len)], lines, True)
     return None
 
@@ -140,7 +139,7 @@ def odds_check(name, lines, high=False):
     match = [k for k in longer if table[k][0] == odds]
     if len(match) == 1:
         return next(n for n in clipper.names() if norm(n) == match[0])
-    return None if match else name             # an odd number that fits no longer name is a misread
+    return None if match else name             # odd number fitting no longer name: misread
 
 
 def odds_of(line):
@@ -191,14 +190,14 @@ def equip(aura, halt, say=print, logged=lambda since: False, other=lambda since:
     """Equip `aura` through Aura Storage; True once it is on."""
     if game.take_foreground() is None:
         return False
-    wrong = set()                               # cells that turned out to be another aura
+    wrong = set()
     for go in range(1, TRIES + 1):
         if halt():
             return False
         if not game.open_by_click('aura_storage', halt):
             if halt():
                 return False
-            shut()                              # the side button toggles, so it may be open anyway
+            shut()                              # side button toggles: may be open anyway
             say('WARN aura_storage_open_failed attempt=%d/%d' % (go, TRIES))
             continue
         cell = find(aura, halt, say, wrong)
@@ -244,7 +243,7 @@ def equip(aura, halt, say=print, logged=lambda since: False, other=lambda since:
             wrong.add(cell)
             shut()
             continue
-        now = shown() if how else None          # the panel now names what really went on
+        now = shown() if how else None          # panel names what really went on
         if now is not None and norm(now) != norm(aura):
             say('WARN equip_wrong_aura aura="%s" seen="%s" via=panel reason=late_click attempt=%d/%d'
                 % (aura, now, go, TRIES))

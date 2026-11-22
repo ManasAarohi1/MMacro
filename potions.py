@@ -8,7 +8,7 @@ POTIONS = ('Heavenly Potion', 'Oblivion Potion', 'Godlike Potion', 'Transcendent
            'Potion of the Dune', "Pump King's Blood", 'Tear of the Goddess')
 TIERS = {'Fortune Potion I': (105, 255, 122), 'Fortune Potion II': (52, 142, 64), 'Fortune Potion III': (44, 101, 29),
          'Haste Potion I': (128, 187, 219), 'Haste Potion II': (4, 175, 236), 'Haste Potion III': (9, 137, 207)}
-GAP_S = 0.15             # between uses
+GAP_S = 0.15
 MAX_USES = 300
 
 

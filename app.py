@@ -17,7 +17,7 @@ import threading
 import time
 import traceback
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 import urllib.error
 import urllib.request
 import uuid
@@ -25,9 +25,9 @@ import webbrowser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')      # numpy reserves memory per core; low-RAM PCs fail to open
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')      # low-RAM PCs fail to open otherwise
 
-try:                                                    # a crash that skips logs.txt still leaves its reason here
+try:                                                    # reason survives a crash before logs.txt
     _crash_dir = os.path.join(os.getenv('LOCALAPPDATA') or os.path.expanduser('~'), 'MMacro')
     os.makedirs(_crash_dir, exist_ok=True)
     _crash_file = open(os.path.join(_crash_dir, 'crash.txt'), 'a', encoding='utf-8')
@@ -73,6 +73,7 @@ try:
     import craftpath  # noqa: E402
     import memmatch  # noqa: E402
     import merchant_cache  # noqa: E402
+    import stats  # noqa: E402
 except Exception as e:          # numpy's DLLs raise OSError, not ImportError
     why = str(e).strip().splitlines()[-1] if str(e).strip() else type(e).__name__
     try:
@@ -104,73 +105,88 @@ VERSION = '1.2.0'
 RELEASE_PAGE = 'https://github.com/ManasAarohi1/MMacro/releases/latest'
 RELEASES = os.environ.get('MMACRO_UPDATE_URL') or 'https://api.github.com/repos/ManasAarohi1/MMacro/releases/latest'
 INVITE = 'https://discord.gg/oppression'
-ITEM_EVERY_S = {game.SC: 20 * 60, game.BR: 35 * 60}    # SC lasts 20 min, BR 35
-ITEM_RETRY_S = 5 * 60                   # retry a failed one after this
-ITEM_SPARE_S = 15                       # past the cooldown, so a use never lands just before it ends
+ITEM_EVERY_S = {game.SC: 20 * 60, game.BR: 35 * 60}
+ITEM_RETRY_S = 5 * 60
+ITEM_SPARE_S = 15                       # lands just after the cooldown
 RUNE = 'cursed rune fragment'
 RUNE_BIOMES = ('PUMPKIN MOON', 'GRAVEYARD')
-RUNE_TRIES, RUNE_RETRY_S = 2, 60        # a missed use is tried once more a minute later, if the biome lasts
+RUNE_TRIES, RUNE_RETRY_S = 2, 60        # one retry a minute later
 SELECTOR_RETRY_S = 5 * 60               # after an unstable biome
-POP_BIOMES = ('GLITCHED', 'DREAMSPACE', 'CYBERSPACE')     # Auto pop's default biomes
-CRAFT_LUCKIES = 250                     # Lucky Potions bought for each Heavenly Potion
-CRAFT_RETRY_S = 10 * 60                 # after a buy or cauldron trip that didn't work
-CRAFT_SELL_SOON_S = 3 * 60              # after a craft: a sell trip this soon buys the Lucky Potions, else a buy trip
-MEMORY_EVERY_S = 12 * 60 * 60 + 60      # Memory Match comes back 12 h after a game
-MEMORY_RETRY_S = 15 * 60                # after a trip that didn't reach it; doubles up to 2 h
-PACES = {'normal': 1.0, 'potato': 2.0, 'fast': 0.6}      # the old PC speed buttons
+POP_BIOMES = ('GLITCHED', 'DREAMSPACE', 'CYBERSPACE')
+CRAFT_LUCKIES = 250                     # Lucky Potions per Heavenly Potion
+CRAFT_RETRY_S = 10 * 60                 # after a failed buy or cauldron trip
+CRAFT_SELL_SOON_S = 3 * 60              # a sell trip this soon buys the Luckies
+MEMORY_EVERY_S = 12 * 60 * 60 + 60      # 12 h after a game
+MEMORY_RETRY_S = 15 * 60                # doubles up to 2 h
+SPEED_NORMAL = 1.2                      # slider 1.0x = old 1.2x
+PACES = {'normal': round(1 / SPEED_NORMAL, 3), 'potato': 2.0, 'fast': 0.6}      # old PC speed buttons
+
+
+def tallest(win):
+    """Most a window may take of the screen's height; the rest scrolls."""
+    return int(win.winfo_screenheight() * 0.85)
 
 
 def speed_of(v):
-    """PC speed slider value, 0.6 (Fast PC) to 2.0 (Potato PC); old button names still read."""
+    """How much longer things take than the old 1.0x: 2.0 (Potato) to 0.2 (mouse at full speed); old button names
+    still read. Waits never go under game.WAIT_FLOOR; past it only the mouse gets quicker."""
     try:
-        return round(min(2.0, max(0.6, float(PACES.get(v, v)))), 1)
+        return round(min(2.0, max(0.2, float(PACES.get(v, v)))), 3)
     except (TypeError, ValueError):
-        return 1.0
+        return PACES['normal']
+
+
+def shown_speed(pace):
+    """The slider's number for a pace: right = faster, Normal 1.0x."""
+    return round(1 / (speed_of(pace) * SPEED_NORMAL), 1)
 HOLD_BIOMES = ('GLITCHED', 'DREAMSPACE', 'CYBERSPACE', 'THE RADIANT FOREST', 'SINGULARITY', 'BLOOD RAIN',
                'GRAVEYARD', 'PUMPKIN MOON')                # no SC, BR or Biome Selector until these end
-SELECTOR_REFUSED_S = 11 * 60            # 3 refusals then span more than the 20 min cooldown
-SELECTOR_REFUSALS = 3                   # refused this often in a row: most likely out of that Drive
-SELECTOR_MISSES = 3                     # no Selector or no Drive seen this often in a row: say so once
+SELECTOR_REFUSED_S = 11 * 60            # 3 refusals outlast the 20 min cooldown
+SELECTOR_REFUSALS = 3                   # likely out of that Drive
+SELECTOR_MISSES = 3
 REJOIN_WAITS = (15, 30, 60)             # last one repeats
 IN_GAME_S = 150                         # after a rejoin, time to really be in game
-OUT_S = 180                             # Roblox up but not in game this long = disconnect
-PLAY_EVERY_S = 20                       # min gap between Play clicks
+OUT_S = 180                             # Roblox up, not in game = disconnect
+PLAY_EVERY_S = 20
 STALL_S = 600                           # loop stuck this long = restart the run
 SLEPT_S = 60                            # clock jumped this far = PC slept
 WATCH_EVERY = 0.5
 CRASH_WAITS = (30, 60, 120, 300)        # last one repeats
 LOOK_EVERY_S = 1.5                      # also how often Eden is looked for
 AFK_EVERY_S = 300                       # Roblox kicks after 20 idle min
-EDEN_RETRY_S = 60                       # retry the Eden contract this often
-EDEN_GIVE_UP_S = 30 * 60                # give up after this (path on)
+EDEN_RETRY_S = 60
+EDEN_GIVE_UP_S = 30 * 60                # path on
 EDEN_AFK_REST_S = 900                   # no jumps while the contract is up
-CRACK = 'portable crack'                # takes you to Eden's spawn, where the walk starts
-CRACK_S = 3.0                           # wait after using it
-EQUIP_RETRY_S = 5 * 60                  # retry a failed equip after this
+CRACK = 'portable crack'                # goes to Eden's spawn
+CRACK_S = 3.0
+EQUIP_RETRY_S = 5 * 60
 JOIN_NONE_S = 300                       # 'nothing equipped' right after a join = title screen
-EQUIP_GAP_S = 90                        # Aura Storage at most this often (auto roll swaps fast)
+EQUIP_GAP_S = 90                        # auto roll swaps fast
 MERCHANT_STALE_S = 150                  # merchants stay ~3 min
-LATE_RESULT_S = 8                       # a reel's result window can take this long
-DAILY_UTC_S = 22 * 3600 + 60             # 22:01 GMT, when daily rewards reset
-DAILY_AGAIN_S = (5 * 60, 10 * 60, 60 * 60)     # pressed again this long after each reset
+LATE_RESULT_S = 8                       # reel result can be this late
+DAILY_UTC_S = 22 * 3600 + 60             # daily reset, 22:01 GMT
+DAILY_AGAIN_S = (5 * 60, 10 * 60, 60 * 60)
 CLOCK_URLS = ('https://www.google.com', 'https://www.cloudflare.com', 'https://github.com')
-DAILY_LATE_S = 90                       # no reset by then (nothing that resets is on): daily rewards anyway
-STRAY_EVERY_S = 20                      # look for a window left open (a cutscene hid it while it was closed)
-CRAFT_POSTED_S = 15                     # a notification this soon after a post here is that same craft
-MEMORY_EVERY_TRIM_S = 60                # memory handed back to Windows this often
-OCR_IDLE_S = 60                         # screen reader models let go after this long unused
-MERCHANT_REPEAT_S = 600                 # one post per visit (the animation replays)
+DAILY_LATE_S = 90                       # no reset seen: claim anyway
+STATS_FIRST_S = 30
+STATS_EVERY_S = 600
+STRAY_EVERY_S = 20                      # a cutscene can hide an open window
+CRAFT_POSTED_S = 15                     # same craft as our post
+MEMORY_EVERY_TRIM_S = 60
+OCR_IDLE_S = 60                         # OCR models freed when idle
+MERCHANT_REPEAT_S = 600
 REOPEN_WHY = 'a merchant was loaded past the block'
-BLOCK_HOLD_S = 60                       # blocked again sooner than this: something keeps undoing it
-BOSS_BIOMES = {'Boss': 'GRAVEYARD', 'Sinister P.': 'PUMPKIN MOON'}     # posted only in these
+BLOCK_HOLD_S = 60                       # re-blocked sooner = being undone
+BOSS_BIOMES = {'Boss': 'GRAVEYARD', 'Sinister P.': 'PUMPKIN MOON'}
 BOSS_EARLY_S = 5                        # seen just before its biome starts still counts
-BOSS_UNREAD_S = 60                      # seen before the biome is read (just joined): waits this long for it
-MERCHANT_TRIES = 3                      # a shop that didn't open is tried again while the merchant is still there
+BOSS_UNREAD_S = 60                      # just joined: wait for the biome
+MERCHANT_TRIES = 3                      # retried while the merchant stays
 
-LOG_MAX = 4 << 20                       # trim logs.txt past this
+LOG_MAX = 4 << 20
 
 
 _log_lock = threading.Lock()
+STATS_HOOK = None                       # the running App's stats counter
 
 
 LEVELS = ('DEBUG', 'INFO', 'WARN', 'ERROR')
@@ -180,6 +196,11 @@ def note(tag, msg):
     """Append a line to logs.txt; never raises. A message may start with its level ('WARN ...')."""
     with _log_lock:
         _note(tag, msg)
+        if STATS_HOOK is not None:
+            try:
+                STATS_HOOK(tag, msg)
+            except Exception:
+                pass
 
 
 def log_line(tag, msg, now=None):
@@ -301,7 +322,7 @@ BIOME_COLOURS = {'NORMAL': 0xB5BAC1, 'WINDY': 0x9ED9FF, 'RAINY': 0x4A7BD0, 'SNOW
                  'HELL': 0xC0392B, 'STARFALL': 0x6C7BFF, 'CORRUPTION': 0x8E44AD, 'NULL': 0x6B6B6B, 'HEAVEN': 0xFFE89A,
                  'LOST FOREST': 0x2E8B57, 'GLITCHED': 0x3BE37A, 'DREAMSPACE': 0xE86AF0, 'CYBERSPACE': 0x2FD3FF,
                  'SINGULARITY': 0x4B1E8C, 'THE RADIANT FOREST': 0xFFF1A8,
-                 'GRAVEYARD': 0x5E6B5A, 'PUMPKIN MOON': 0xFF7A1A, 'BLOOD RAIN': 0x8B0A1A}      # events
+                 'GRAVEYARD': 0x5E6B5A, 'PUMPKIN MOON': 0xFF7A1A, 'BLOOD RAIN': 0x8B0A1A}
 PING = {'GLITCHED', 'DREAMSPACE', 'CYBERSPACE'}
 CLIP_COLOURS = ((10 ** 10, 0xFFC94D), (10 ** 9, 0xB38CFF), (10 ** 8, 0x58B9FF), (1, EMBED_GOOD))  # by rarity
 MERCHANT_COLOURS = {'Rin': 0xFF8C00, 'Mari': 0xFFD700, 'Jester': 0x9B59B6, 'Boss': 0x6A0DAD, 'Sinister P.': 0x6A0DAD}
@@ -330,7 +351,7 @@ def sync_clock(timeout=10):
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 date = r.headers['Date']
             t1 = time.time()
-            _clock_off = email.utils.parsedate_to_datetime(date).timestamp() + 0.5 - (t0 + t1) / 2   # whole seconds
+            _clock_off = email.utils.parsedate_to_datetime(date).timestamp() + 0.5 - (t0 + t1) / 2
             return _clock_off
         except Exception as e:
             why = e
@@ -386,6 +407,9 @@ class BiomeWatcher:
 
 def pretty(name):
     return ' '.join(w.capitalize() for w in name.split())
+
+
+stats.BIOMES = tuple(pretty(b) for b in BIOME_COLOURS)
 
 
 def clean_url(text):
@@ -521,7 +545,7 @@ def append_history(biome):
 
 
 # ================================================================ updates
-# swaps the update in once MMacro has closed, then starts it again
+# swap in the update after exit, then restart
 SWAP_BAT = r"""@echo off
 set sys=%SystemRoot%\System32
 set n=0
@@ -600,8 +624,8 @@ def can_write(folder):
 def install(new, exe, pid, zipped):
     bat = os.path.join(tempfile.gettempdir(), 'mmacro_update_%d.bat' % pid)
     with open(bat, 'w', encoding='ascii') as f:
-        f.write(SWAP_BAT)       # paths go in as env vars, a .bat can mangle them
-    # so the new exe unpacks its own files
+        f.write(SWAP_BAT)       # paths via env vars: a .bat mangles them
+    # new exe unpacks its own files
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith(('_PYI_', '_MEIPASS'))}
     env.update(PYINSTALLER_RESET_ENVIRONMENT='1', MMACRO_NEW=new, MMACRO_EXE=exe, MMACRO_DIR=os.path.dirname(exe), MMACRO_PID=str(pid),
                MMACRO_ZIP='1' if zipped else '0')
@@ -702,10 +726,10 @@ class Switch(tk.Canvas):
     """Sliding two- or three-way switch."""
     W, H, SLIDE_MS, STEP_MS = 72, 30, 180, 12
 
-    def __init__(self, parent, variable, options, bg=PANEL):
+    def __init__(self, parent, variable, options, bg=PANEL, w=None):
         self.options = options
         k = parent.winfo_fpixels('1i') / 96.0
-        self.w, self.h = int(self.W * k), int(self.H * k)
+        self.w, self.h = int((w or self.W) * k), int(self.H * k)
         tk.Canvas.__init__(self, parent, width=self.w * len(options) + 2, height=self.h + 2, bg=bg,
                            highlightthickness=0, bd=0, cursor='hand2')
         self.var = variable
@@ -791,7 +815,7 @@ class Calibrate(tk.Toplevel):
         self.title('Calibrate buttons')
         tall = 230 + 52 * len(self.points) if points else 520
         self.geometry('460x%d' % min(tall, self.winfo_screenheight() - 140))
-        self.minsize(420, 300)                  # list scrolls if it doesn't fit
+        self.minsize(420, 300)
         self.configure(bg=BG)
         self.transient(app.root)
         self.protocol('WM_DELETE_WINDOW', self.finish)
@@ -1025,49 +1049,49 @@ class App:
         self.server_link = ''
         self.reconnect_on = False
         self.browser_rejoin = False
-        self.speed = 1.0
+        self.speed = PACES['normal']
         self.need_rejoin = None
         self.start_again = False
         self.item_due = {}
         self._toast = None
-        self._key_stop = False          # F2 stopped it: say 'stopped' once done
-        self.played = False             # Play pressed in a run: claim daily rewards once back in
+        self._key_stop = False          # F2: say 'stopped' when done
+        self.played = False             # claim daily rewards once back in
         self.rune_biomes, self.rune_wait, self.rune_due, self.rune_tries = set(), 0, None, 0
         self.selector_biome, self.selector_due, self.selector_refused, self.selector_missed = None, None, 0, 0
         self.pop_biomes, self.pop_due, self.pop_list = set(), None, {}
-        self.pop_left = None                # (biome, {potion: amount}) still to use after an interrupted pop
+        self.pop_left = None                # left after an interrupted pop
         self.rejoining = False
         self.watch = None
         self.merchant_detect = False
-        self.block_on = False       # copy for the cache thread (Tk vars are UI-thread only)
+        self.block_on = False       # Tk vars are UI-thread only
         self.blocked = {}           # file key: when Roblox last read the real one (ms)
-        self.block_at, self.block_undone = {}, False   # when we last wrote each block; it keeps being undone
+        self.block_at, self.block_undone = {}, False   # last write per block
         self.block_path = None
         self.block_lock = threading.Lock()
-        self.got_past_block = False  # Roblox has a real animation in memory: reopen it
-        self.merchant_due = None    # merchant waiting to be collected
+        self.got_past_block = False  # real animation loaded: reopen
+        self.merchant_due = None
         self.merchant_at = 0.0
-        self._merchant_posted = {}  # merchant: last posted
+        self._merchant_posted = {}
         self._boss_seen = {}        # boss: posted if its biome starts by this time
         self.collect = False
         self.wanted = {}
-        self.collect_names = set()  # ticked under Teleport to
-        self.clipper = None         # only during a run with clipping on
+        self.collect_names = set()
+        self.clipper = None
         self.clip_min = 0
         self.equip_aura = None
-        self.crack_on = False       # Eden on: Portable Crack after a merchant or rejoin
-        self.in_dimension = True    # in Eden's dimension; merchants and rejoins leave it
-        self.equip_due = None       # next Aura Storage check (monotonic), None = not due
+        self.crack_on = False       # crack after a merchant or rejoin
+        self.in_dimension = True    # merchants and rejoins leave it
+        self.equip_due = None       # monotonic, None = not due
         self.equip_busy_at = 0.0    # so our own equip isn't clipped as a roll
-        self.aura_logged = (None, 0.0)      # (aura, wall time) from the log
-        self.run_wall = 0.0                 # run start, wall clock
-        self.equip_fails = 0                # failed equips in a row, for backoff
-        self.joined_at = 0.0                # last (re)join, monotonic
+        self.aura_logged = (None, 0.0)
+        self.run_wall = 0.0
+        self.equip_fails = 0
+        self.joined_at = 0.0
         self.biome_now = ''
         self.fisher = None
         self.out_since = None
         self._look_at = self._played = 0.0
-        self.beat = time.monotonic()    # watchdog heartbeat
+        self.beat = time.monotonic()
         self.restart_run = False
         self.run_id = 0             # old connection watchers quit when this changes
         self.updates = queue.Queue()
@@ -1087,6 +1111,7 @@ class App:
         root.report_callback_exception = self._oops
 
         self._header()
+        self.stats, self.stats_view, self.stats_custom, self.stats_win, self.stats_buttons = None, 'Last run', None, None, {}
         self.pages = {k: tk.Frame(self.body, bg=BG) for k in ('macro', 'items', 'fishing', 'merchant', 'eden', 'credits')}
         self._settings_card(self.pages['macro'])
         self._biome_card(self.pages['macro'])
@@ -1098,7 +1123,7 @@ class App:
         self._eden_card(self.pages['eden'])
         self._credits_card(self.pages['credits'])
         if self.eden_on.get() and self.fish_on.get():
-            self.fish_on.set(False)                     # old settings could have both; keep Eden
+            self.fish_on.set(False)                     # old settings: keep Eden
         self.eden_on.trace_add('write', lambda *a: self._one_of(self.eden_on, self.fish_on, 'Auto fishing'))
         self.fish_on.trace_add('write', lambda *a: self._one_of(self.fish_on, self.eden_on, 'Eden detector'))
         self._buttons()
@@ -1106,7 +1131,7 @@ class App:
         self.tab.trace_add('write', self._show_tab)
         self._show_tab()
         root.update_idletasks()
-        h = min(self.body.winfo_reqheight(), root.winfo_screenheight() - 80)
+        h = min(self.body.winfo_reqheight(), tallest(root))
         root.geometry('%dx%d+%d+%d' % (w, h, max(0, (root.winfo_screenwidth() - w) // 2), 20))
         root.minsize(min(w, int(360 * k)), min(h, int(300 * k)))
 
@@ -1151,6 +1176,7 @@ class App:
         bar.pack(fill='x', padx=16, pady=(12, 0))
         self.tab = tk.StringVar(value='macro')
         tk.Label(bar, text=TITLE, bg=BG, fg=TEXT, font=(UIB, 18)).pack(anchor='w')
+        tk.Button(bar, text='Stats', command=self.open_stats, padx=12, **SMALL_BUTTON).place(relx=1.0, y=4, anchor='ne')
         tk.Label(bar, text='Biome alerts and automation for Sol\'s RNG', bg=BG, fg=DIM,
                  font=(UI, 9)).pack(anchor='w', pady=(3, 0))
         Switch(bar, self.tab, (('macro', 'Macro'), ('items', 'Items'), ('fishing', 'Fishing'), ('merchant', 'Merchant'), ('eden', 'Eden'),
@@ -1284,21 +1310,24 @@ class App:
                                            'rejoin_browser')
         rule(box)
         saved = self.cfg.get('pc_speed') or ('potato' if self.cfg.get('low_end') else 'normal')
+        if self.cfg.get('pc_speed_v') != 2 and speed_of(saved) == 1.0:
+            saved = 'normal'                            # old Normal -> new quicker one
         self.pc_speed = tk.DoubleVar(value=speed_of(saved))
-        self._row(box, 'PC speed', 'Slide left if your PC lags: slower mouse, longer waits',
-                  self._speed_slider)
+        self._row(box, 'PC speed', 'Slide left if your PC lags: slower mouse, longer waits. Past Fast only the mouse '
+                  'gets quicker', self._speed_slider)
 
     def _speed_slider(self, parent):
         frame = tk.Frame(parent, bg=PANEL)
-        fast = self.pc_fast = tk.DoubleVar(value=round(1 / speed_of(self.pc_speed.get()), 1))     # right = faster
-        Slider(frame, fast, 0.5, 1.7, 0.1, ((0.5, 'Potato'), (1.0, 'Normal'), (1.7, 'Fast'))).pack(side='left')
+        fast = self.pc_fast = tk.DoubleVar(value=shown_speed(self.pc_speed.get()))
+        Slider(frame, fast, 0.4, 4.0, 0.1, ((0.4, 'Potato'), (1.0, 'Normal'), (1.4, 'Fast'), (4.0, 'Max'))).pack(
+            side='left')
         shown = tk.Label(frame, bg=SUNK, fg=ACCENT, font=(UIB, 9), width=5, padx=4, pady=2,
                          highlightthickness=1, highlightbackground=EDGE)
         shown.pack(side='left', padx=(8, 0), anchor='n')
 
         def moved(*_):
             shown.configure(text='%.1fx' % fast.get())
-            self.pc_speed.set(speed_of(1 / max(0.1, fast.get())))      # what's saved: how much longer things take
+            self.pc_speed.set(speed_of(1 / (max(0.1, fast.get()) * SPEED_NORMAL)))    # saved as a slowdown
         fast.trace_add('write', moved)
         shown.configure(text='%.1fx' % fast.get())
         return frame
@@ -1312,7 +1341,7 @@ class App:
         self.craft_on = self._toggle(box, 'Auto craft', 'Takes turns on these at Stella\'s cauldron: turns each '
                                      'one\'s Auto on for its turn, adds everything and crafts', 'craft_on')
         if self.craft_hp.get() and self.craft_on.get():
-            self.craft_on.set(False)                    # old settings could have both; keep Heavenly
+            self.craft_on.set(False)                    # old settings: keep Heavenly
         both = 'Auto Heavenly Potion and Auto craft'
         self.craft_hp.trace_add('write', lambda *a: self._one_of(self.craft_hp, self.craft_on, 'Auto craft', both))
         self.craft_on.trace_add('write', lambda *a: self._one_of(self.craft_on, self.craft_hp,
@@ -1330,8 +1359,10 @@ class App:
         self.craft_rows = {}
         for name in self._craft_picked():
             self._craft_row(name)
-        self.craft_every = self._field(opts, 'Each turn', str(self.cfg.get('craft_every', 30)),
+        self.craft_every = self._field(opts, 'Each turn', str(self.cfg.get('craft_every', 60)),
                                        'Minutes on one item before the next')
+        self.craft_readd = self._toggle(opts, 'Add all after item crafted', 'Goes back to add everything for an '
+                                        'item as soon as its crafted notification shows', 'craft_readd')
         rule(box)
         self.memory_on = self._toggle(box, 'Auto Memory Match', 'Walks to the Memory Match stand when it\'s ready '
                                       '(every 12 hours) and plays every pair from memory', 'memory_on')
@@ -1343,7 +1374,7 @@ class App:
 
     def _skip_window(self):
         old = getattr(self, '_skip_top', None)
-        if old is not None and old.winfo_exists():          # one window: two would save over each other
+        if old is not None and old.winfo_exists():          # two would save over each other
             old.destroy()
         top = self._skip_top = tk.Toplevel(self.root, bg=BG)
         top.title('Memory Match rewards')
@@ -1371,7 +1402,7 @@ class App:
                 img = Image.open(memmatch.path_of(name)).convert('RGB')
             except OSError:
                 continue
-            img = img.crop((0, 0, img.width, int(0.76 * img.height)))      # the picture, not its amount
+            img = img.crop((0, 0, img.width, int(0.76 * img.height)))      # drop the amount
             img.thumbnail((64, 64))
             top.pics.append(ImageTk.PhotoImage(img))
             tile = tk.Frame(grid, bg=BAD if name in skip else EDGE, padx=3, pady=3, cursor='hand2')
@@ -1422,15 +1453,15 @@ class App:
 
     def craft_minutes(self):
         try:
-            return max(5, int(self.craft_every.get().strip() or 30))
+            return max(5, int(self.craft_every.get().strip() or 60))
         except ValueError:
-            return 30
+            return 60
 
     def _pop_card(self, parent):
         box = card(parent, fill='x', padx=16, pady=(0, 10))
         self.pop_on = self._toggle(box, 'Auto pop', 'Uses potions when a biome starts', 'pop_on')
         box = self._when(box, self.pop_on)
-        self.pop_sets = {}                              # biome: {potion: amount text}
+        self.pop_sets = {}
         saved = self.cfg.get('pop_items')
         saved = saved if isinstance(saved, dict) else {}
         if saved and all(not isinstance(v, dict) for v in saved.values()):     # one list for every picked biome
@@ -1441,7 +1472,7 @@ class App:
                 self.pop_sets[biome] = {n: str(a) for n, a in items.items() if n in potions.POTIONS}
         self.pop_box = tk.Frame(box, bg=PANEL)
         self.pop_box.pack(fill='x', padx=12)
-        self.pop_frames = {}                            # biome: (frame, {potion: row})
+        self.pop_frames = {}
         for biome in self.pop_sets:
             self._pop_biome(biome)
         add = tk.Button(box, text='Add biome \u25be', padx=10, **SMALL_BUTTON)
@@ -1482,7 +1513,7 @@ class App:
         self.pop_sets.pop(biome, None)
         self.pop_frames.pop(biome)[0].destroy()
         if not self.pop_frames:
-            self.pop_box.configure(height=1)        # Tk keeps an emptied frame's old size
+            self.pop_box.configure(height=1)
         self._autosave_later()
         self.root.after_idle(self._fit_window)
 
@@ -1612,6 +1643,138 @@ class App:
         lock()
         tk.Frame(box, bg=PANEL, height=6).pack()
 
+    def open_stats(self):
+        """The stats window; one at a time."""
+        if self.stats_win is not None and self.stats_win.winfo_exists():
+            self.stats_win.deiconify()
+            self.stats_win.lift()
+            return
+        win = self.stats_win = tk.Toplevel(self.root, bg=BG)
+        win.title(TITLE + ' stats')
+        self.stats_page = self._scroller(win)
+        box = card(self.stats_page, fill='both', padx=16, pady=16)
+        tk.Label(box, text='Stats', bg=PANEL, fg=TEXT, font=(UIB, 12), anchor='w').pack(fill='x', padx=18, pady=(12, 0))
+        views = tk.Frame(box, bg=PANEL)
+        views.pack(fill='x', padx=18, pady=(6, 2))
+        self.stats_buttons = {}
+        for i, view in enumerate(stats.VIEWS):
+            self.stats_buttons[view] = tk.Button(views, text=view, command=lambda v=view: self.pick_stats(v), padx=6,
+                                                 **SMALL_BUTTON)
+            self.stats_buttons[view].grid(row=i // 4, column=i % 4, sticky='ew', padx=(0, 4), pady=(0, 4))
+        self.stats_body = tk.Frame(box, bg=PANEL)
+        self.stats_body.pack(fill='x', padx=18, pady=(8, 16))
+        win.protocol('WM_DELETE_WINDOW', lambda: (win.destroy(), setattr(self, 'stats_win', None)))
+        self.show_stats()
+        note('stats', 'stats_window_open')
+
+    def pick_stats(self, view):
+        if view == 'Custom':
+            today = time.strftime('%Y-%m-%d')
+            a = simpledialog.askstring(TITLE, 'From (YYYY-MM-DD):', initialvalue=today, parent=self.root)
+            b = a and simpledialog.askstring(TITLE, 'To (YYYY-MM-DD):', initialvalue=today, parent=self.root)
+            if not b:
+                return
+            self.stats_custom = stats.custom_span(a, b)
+            if self.stats_custom is None:
+                messagebox.showerror(TITLE, 'Dates are YYYY-MM-DD, with To on or after From.')
+                return
+        self.stats_view = view
+        note('stats', 'stats_view view="%s"' % view)
+        self.show_stats()
+
+    def show_stats(self):
+        """Redraw the stats window for the picked view, if it's open, and fit it to the screen (UI thread)."""
+        if self.stats_win is None or not self.stats_win.winfo_exists():
+            return
+        self._draw_stats()
+        win, page = self.stats_win, self.stats_page
+        win.update_idletasks()
+        win.geometry('%dx%d' % (page.winfo_reqwidth(), min(page.winfo_reqheight(), tallest(win))))
+
+    def _draw_stats(self):
+        now = time.monotonic()
+        if self.stats_view == 'Last run':
+            label = 'Last run' + (' (running)' if self.running and self.stats else '')
+            last = stats.last_run(stats.load())
+            d = self.stats.summary(now) if self.stats else stats.total(last, 0, float('inf')) if last else None
+        else:
+            since, until = stats.span(self.stats_view, custom=self.stats_custom)
+            records = stats.load() + ([self.stats.pending(now)] if self.stats else [])
+            label = self.stats_view if self.stats_view != 'Custom' else '%s to %s' % (
+                time.strftime('%Y-%m-%d', time.localtime(since)), time.strftime('%Y-%m-%d', time.localtime(until - 1)))
+            d = stats.total(records, since, until)
+        for view, button in self.stats_buttons.items():
+            button.configure(fg=ACCENT if view == self.stats_view else TEXT)
+        body = self.stats_body
+        for w in body.winfo_children():
+            w.destroy()
+        tk.Label(body, text=label, bg=PANEL, fg=DIM, font=(UI, 9), anchor='w').pack(fill='x')
+        if d is None:
+            tk.Label(body, text='Press Start to begin a run.', bg=PANEL, fg=TEXT, font=(UI, 10), anchor='w').pack(
+                fill='x', pady=(6, 0))
+            return
+        tiles, sections = stats.layout(d)
+        top = tk.Frame(body, bg=PANEL)
+        top.pack(fill='x', pady=(6, 0))
+        for i, (name, value) in enumerate(tiles):
+            tile = tk.Frame(top, bg=SUNK, padx=10, pady=8)
+            tile.grid(row=0, column=i, sticky='nsew', padx=(0, 6 if i < len(tiles) - 1 else 0))
+            top.columnconfigure(i, weight=1, uniform='tile')
+            tk.Label(tile, text=value, bg=SUNK, fg=ACCENT, font=(UIB, 14), anchor='w').pack(fill='x')
+            tk.Label(tile, text=name, bg=SUNK, fg=DIM, font=(UI, 8), anchor='w').pack(fill='x')
+        grid = tk.Frame(body, bg=PANEL)
+        grid.pack(fill='x', pady=(14, 0))
+        grid.columnconfigure(0, weight=1, uniform='col')
+        grid.columnconfigure(1, weight=1, uniform='col')
+        row = col_at = 0
+        for title, rows, wide in sections:
+            if wide and col_at:
+                row, col_at = row + 1, 0
+            col = tk.Frame(grid, bg=PANEL)
+            col.grid(row=row, column=col_at, columnspan=2 if wide else 1, sticky='new',
+                     padx=(0, 18) if col_at == 0 and not wide else 0, pady=(0, 12))
+            per = 3 if wide else 1
+            for k in range(per):
+                col.columnconfigure(2 * k, weight=1)
+            tk.Label(col, text=title.upper(), bg=PANEL, fg=DIM, font=(UIB, 8), anchor='w').grid(
+                row=0, column=0, columnspan=2 * per, sticky='w', pady=(0, 3))
+            down = -(-len(rows) // per)
+            for j, (name, value) in enumerate(rows):
+                r, k = 1 + j % down, j // down
+                zero = value in ('0', '')
+                tk.Label(col, text=name, bg=PANEL, fg=DIM if zero else TEXT, font=(UI, 10), anchor='w').grid(
+                    row=r, column=2 * k, sticky='w')
+                tk.Label(col, text=value, bg=PANEL, fg=DIM if zero else TEXT, font=(UIB, 10), anchor='e').grid(
+                    row=r, column=2 * k + 1, sticky='e', padx=(8, 18 if k < per - 1 else 0))
+            if wide:
+                row += 1
+            else:
+                row, col_at = (row + 1, 0) if col_at else (row, 1)
+
+    def count_event(self, tag, msg):
+        got = stats.counts_for(tag, msg)
+        if got and self.stats is not None:
+            self.stats.counts.update(got)
+            self._set(stats=True)
+
+    def stats_turn(self, final=False):
+        """Read the fish points, log the run's stats and add them to the history."""
+        s, t = self.stats, time.monotonic()
+        try:
+            value = stats.read_points_sure()
+        except Exception as e:
+            note('stats', 'WARN points_read_failed type=%s msg="%s"' % (type(e).__name__, e))
+            value = None
+        if value is None:
+            note('stats', 'WARN points_unread took_s=%.1f' % (time.monotonic() - t))
+        else:
+            note('stats', 'points_read value=%d change=%+d took_s=%.1f' % (value, s.points(value), time.monotonic() - t))
+        s.save(time.monotonic())
+        if final:
+            s.end = time.monotonic()
+        note('stats', '%s %s' % ('run_stats' if final else 'stats', stats.line(s.summary(time.monotonic()))))
+        self._set(stats=True)
+
     def _merchant_card(self, parent):
         box = card(parent, fill='x', padx=16, pady=10)
         self.merchant_on = self._toggle(box, 'Merchant detection', 'Tells you when a merchant or the boss shows up', 'merchant_on')
@@ -1653,7 +1816,7 @@ class App:
         pick.pack(side='right', padx=(6, 0))
         self.items_box = tk.Frame(box, bg=PANEL)
         self.items_box.pack(fill='x', padx=12, pady=(0, 10))
-        self.item_rows = {}                             # name: (on, amount, row)
+        self.item_rows = {}
         saved = self.cfg.get('buy_items')
         saved = dict(saved) if isinstance(saved, dict) else {}
         for name, amount in shop.wanted_from_text(self.cfg.get('buy_list', '')).items():    # old text box setting
@@ -1724,7 +1887,7 @@ class App:
     def _fit_window(self):
         """Fit the window to its contents, up to the screen."""
         self.root.update_idletasks()
-        h = min(self.body.winfo_reqheight(), self.root.winfo_screenheight() - 80)
+        h = min(self.body.winfo_reqheight(), tallest(self.root))
         if h != self.root.winfo_height():
             self.root.geometry('%dx%d' % (self.root.winfo_width(), h))
 
@@ -1825,10 +1988,12 @@ class App:
                                 'auto_reconnect': bool(self.auto_reconnect.get()),
                                 'rejoin_browser': bool(self.rejoin_browser.get()),
                                 'pc_speed': speed_of(self.pc_speed.get()),
+                                'pc_speed_v': 2,
                                 'craft_hp': bool(self.craft_hp.get()),
                                 'craft_on': bool(self.craft_on.get()),
                                 'craft_names': self.craft_names.get().strip(),
                                 'craft_every': self.craft_minutes(),
+                                'craft_readd': bool(self.craft_readd.get()),
                                 'memory_on': bool(self.memory_on.get()),
                                 'low_end': speed_of(self.pc_speed.get()) >= 1.5,
                                 'eden_on': bool(self.eden_on.get()),
@@ -1892,11 +2057,11 @@ class App:
         """The next key combo pressed becomes the clip key."""
         if getattr(self, '_capturing', False):
             return
-        if self.running:                        # it'd catch the macro's own keys
+        if self.running:                        # would catch our own keys
             messagebox.showinfo('Clip key', 'Stop the macro first, then set the clip key.', parent=self.root)
             return
         self._capturing, before = True, self.clip_keys.get()
-        self.clip_key_button.configure(textvariable='', text='press it now...')     # Esc cancels
+        self.clip_key_button.configure(textvariable='', text='press it now...')
 
         def wait():
             got = clipper.capture_keys()
@@ -1951,7 +2116,7 @@ class App:
         state, was = ctypes.windll.user32.GetAsyncKeyState, {}
         while not self._closing:
             for vk, key in ((0x70, keyboard.Key.f1), (0x71, keyboard.Key.f2)):
-                held = bool(state(vk) & 0x8000)             # the 'pressed since' bit is unreliable (RDP etc.)
+                held = bool(state(vk) & 0x8000)             # 'pressed since' bit fails over RDP
                 if held and not was.get(vk) and not getattr(self, '_capturing', False):
                     self.on_key(key)
                 was[vk] = held
@@ -1970,7 +2135,7 @@ class App:
             self._last_hotkey[which] = now
             note('run', 'hotkey key=F%d' % (1 if which == 'start' else 2))
             if which == 'stop':
-                game.ABORT = True            # the run sees this right away
+                game.ABORT = True
             self.updates.put({'action': which, 'key': True})
         except Exception:
             pass
@@ -2087,7 +2252,7 @@ class App:
     def _merchant_toggled(self, *_):
         self.block_on = bool(self.merchant_on.get())
         if not self.block_on:
-            self.merchant_detect = False                # a run going stops looking for merchants too
+            self.merchant_detect = False
 
     def _keep_block(self):
         """Block merchant animations while detection is on, take the block out when off."""
@@ -2105,7 +2270,7 @@ class App:
                     now = time.monotonic()
                     undone = any(now - self.block_at.get(k, -1e9) < BLOCK_HOLD_S for k in wrote)
                     self.block_at = {**self.block_at, **{k: now for k in wrote}}
-                    if undone:                          # not Roblox loading a merchant: no reopen for it
+                    if undone:                          # not a merchant load: no reopen
                         if not self.block_undone:
                             note('merchant', 'WARN block_undone action=reblock reopen=false')
                         self.block_undone = True
@@ -2115,7 +2280,7 @@ class App:
                         note('merchant', 'block_written n=%d again=%s already_loaded=%s' % (
                             len(wrote), str(bool(self.blocked)).lower(), str(bool(past)).lower()))
                         self.got_past_block = self.got_past_block or past
-                    self.blocked = {**self.blocked, **wrote}      # replaced, not mutated: other threads read it
+                    self.blocked = {**self.blocked, **wrote}      # replaced: other threads read it
                     self.block_path = path
             elif self.blocked or self.cache.ours:
                 self._unblock(keys)
@@ -2159,6 +2324,7 @@ class App:
         change = watcher.feed(biome)
         if change:
             name, alert = change
+            note('biome', 'biome_start biome="%s"' % pretty(name))
             self.rune_biome_changed(name)
             self.pop_biome_changed(name)
             for boss, until in list(self._boss_seen.items()):
@@ -2174,7 +2340,7 @@ class App:
 
     def clip_aura(self, aura, line):
         n = clipper.rarity(aura, self.biome_now, line)
-        if n is not None and n < self.clip_min:     # not on the aura list: clipped, it may be a new rare one
+        if n is not None and n < self.clip_min:     # not on the list: may be a new rare
             return
         odds = '1 in {:,}'.format(n) if n else 'rarity unknown'
         note('clip', 'clip_start aura="%s" rarity=%s' % (aura, n or 'unknown'))
@@ -2213,7 +2379,7 @@ class App:
             return
         except Exception as e:
             self._oops(type(e), e, None)
-        self.root.after(25, self._pump)       # hotkey latency
+        self.root.after(25, self._pump)
 
     def notice(self, text, colour=TEXT, ms=2200):
         """Toast over Roblox so F1/F2 in game get feedback."""
@@ -2231,7 +2397,7 @@ class App:
             elif self.running:
                 self.notice('MMacro is already running  (F2 stops it)', ACCENT)
             else:
-                self.notice('MMacro: starting', GOOD, 1200)     # short, the run is about to read the screen
+                self.notice('MMacro: starting', GOOD, 1200)
         elif kw.get('action') == 'stop':
             self._key_stop = self.running
             self.notice('MMacro: stopping' if self.running else 'MMacro is not running  (F1 starts it)',
@@ -2242,6 +2408,8 @@ class App:
             self.notice(kw['toast'], BAD, 12000)
         if 'phase' in kw:
             self.phase(kw['phase'], kw.get('colour', TEXT))
+        if 'stats' in kw:
+            self.show_stats()
         if 'biome' in kw:
             self.phase(*kw['biome'])
         if kw.get('key'):
@@ -2250,7 +2418,7 @@ class App:
             self.start_again = True                         # F1 while still stopping: start again after
             self.phase('stopping - starting again after it', DIM)
         elif kw.get('action') == 'start' and not self.running:
-            self.phase('starting', GOOD)                    # show the press before any slow checks
+            self.phase('starting', GOOD)
             self.start()
         elif kw.get('action') == 'stop' and self.running:
             self.stop()
@@ -2291,7 +2459,7 @@ class App:
     def offer_update(self, found):
         tag, url, size = found
         if self.updating or self.ran or version_tuple(tag) <= version_tuple(VERSION):
-            return                  # only asked on opening
+            return
         folder = os.path.dirname(sys.executable)
         if not can_write(folder):
             if messagebox.askyesno(TITLE, "MMacro %s is out, but this folder can't be written to:\n%s\n\n"
@@ -2331,7 +2499,7 @@ class App:
         self.server.set(self.server_link)
         self.reconnect_on = bool(self.auto_reconnect.get())
         self.played = False
-        self.item_due = {}                      # both due now
+        self.item_due = {}
         self.browser_rejoin = bool(self.rejoin_browser.get())
         self.speed = speed_of(self.pc_speed.get())
         if self.reconnect_on and not game.deeplink(self.server_link):
@@ -2369,11 +2537,12 @@ class App:
         self.craft_list = [n.strip() for n in self.craft_names.get().split(',') if n.strip()] \
             if self.craft_on.get() and not self.craft_hp.get() else []
         self.craft_due = time.monotonic() if self.craft_list else None
-        self.craft_turn = 0                             # which item's turn it is
+        self.craft_again = None                         # re-add everything after it crafts
+        self.craft_turn = 0
         self.craft_stage, self.craft_at = None, 0.0     # Heavenly Potion: 'cauldron' (once), 'wait', 'buy'
         self.craft_short = 0                            # buy trips in a row without the fish points
         self.memory_due = None
-        if self.memory_on.get():                        # the time read off the stand last run still holds
+        if self.memory_on.get():                        # stand time from last run holds
             self.memory_due = time.monotonic() + memory_left(game.load_settings().get('memory_at'))
         self.memory_fails = 0
         if self.craft_hp.get():
@@ -2398,7 +2567,7 @@ class App:
         self.equip_aura = self._correct_aura() if self.equip_on.get() else None
         if self.equip_on.get() and not self.equip_aura:
             note('equip', 'WARN equip_off reason="aura not in list"')
-        self.equip_due = time.monotonic() if self.equip_aura else None      # check once at start
+        self.equip_due = time.monotonic() if self.equip_aura else None
         self.crack_on, self.in_dimension = bool(self.eden_on.get()), True
         self.run_wall, self.equip_busy_at, self.equip_fails = time.time(), -EQUIP_GAP_S, 0
         self.start_biomes(self.url)
@@ -2445,7 +2614,7 @@ class App:
 
     def _guard(self):
         """Runs until Stop; restarts after a crash."""
-        ctypes.windll.kernel32.SetThreadExecutionState(0x80000003)      # keep the PC and screen awake
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000003)
         try:
             for k in itertools.count():
                 try:
@@ -2500,6 +2669,9 @@ class App:
         game.arm()
         game.fresh_session()
         game.set_pace(speed_of(self.speed))
+        global STATS_HOOK
+        self.stats = stats.Stats(time.monotonic())
+        STATS_HOOK = self.count_event
         note('run', 'run_start device="%s"' % device_line())
         self.joined_at = time.monotonic()
         self.need_rejoin = self.out_since = None
@@ -2511,7 +2683,7 @@ class App:
             note('merchant', 'WARN merchant_preloaded action=reopen_roblox at=start')
             game.close_roblox()
             self.need_rejoin = 'a merchant was loaded before the block'
-        self.got_past_block = False                     # already checked above
+        self.got_past_block = False
         self.run_id += 1
         self.beat = time.monotonic()
         threading.Thread(target=self._watch_connection, args=(self.run_id,), daemon=True).start()
@@ -2533,16 +2705,17 @@ class App:
                                      full_check=bool(self.fish_full_check.get()),
                                      say=lambda m: note('fishing', m),
                                      report=self.post_fishing) if self.fish_on.get() else None
-        if self.fisher:                                 # a rune biome that starts on the way is used before the sale
+        stats_due = time.monotonic() + STATS_FIRST_S
+        if self.fisher:                                 # a rune biome on the way is used first
             self.fisher.cut = lambda: ('a Cursed Rune Fragment is due' if self.rune_due is not None
                                        and time.monotonic() >= self.rune_due else '')
         self._set(phase='running', colour=GOOD)
         while not game.ABORT:
-            self.beat = time.monotonic()                    # a pass is progress: the watchdog is for a hung call
+            self.beat = time.monotonic()                    # watchdog is for a hung call
             if self.need_rejoin:
-                self.merchant_due = None                    # merchant is gone with the old server
+                self.merchant_due = None
                 if self.need_rejoin != REOPEN_WHY:          # same server after a reopen: its merchant was seen
-                    self._merchant_posted = {}              # post again on the new server
+                    self._merchant_posted = {}
                 if self.fisher:
                     self.fisher.hold = self.fisher.pause = False
                 if not self.reconnect():
@@ -2550,7 +2723,7 @@ class App:
                     self.tell('Could not get back in', 'Macro stopped', EMBED_BAD, 'Connection')
                     break
                 self.joined_at = time.monotonic()
-                self.got_past_block = False                 # fresh Roblox
+                self.got_past_block = False
                 self.in_dimension = False                   # new servers start in the main dimension
                 self.fit_roblox()
                 if self.fisher:
@@ -2562,7 +2735,7 @@ class App:
                 self.got_past_block = False
                 note('merchant', 'WARN merchant_preloaded action=reopen_roblox at=run')
                 game.close_roblox()
-                time.sleep(game.CLOSED_SETTLE_S)            # opened at once, the closing Roblox can swallow it
+                time.sleep(game.CLOSED_SETTLE_S)            # closing Roblox can swallow it
                 self.need_rejoin = REOPEN_WHY
                 continue
             self.check_in_game()
@@ -2593,6 +2766,9 @@ class App:
                 if self.fisher:
                     self.fisher.lost()
                 continue
+            if time.monotonic() >= stats_due and not busy() and not (self.fisher and self.fisher.line_out):
+                stats_due = time.monotonic() + STATS_EVERY_S
+                self.stats_turn()
             if self.use_items and not game.ABORT and self.items_due():
                 self.items_turn(busy)
             if (self.rune_due is not None and time.monotonic() >= self.rune_due and not busy()):
@@ -2612,7 +2788,7 @@ class App:
             elif self.craft_stage == 'buy' and self.fisher and now >= self.craft_at and not busy():
                 self.between_fish(busy, 'craft', 'buying Lucky Potions', lambda: self.lucky_turn(busy))
             if ((self.craft_stage == 'cauldron' and now >= self.craft_at)
-                    or (self.craft_due is not None and now >= self.craft_due)) and not busy():
+                    or (self.craft_due is not None and now >= self.craft_due) or self.craft_again) and not busy():
                 self.between_fish(busy, 'craft', 'to Stella\'s cauldron', lambda: self.cauldron_turn(busy))
             if (self.equip_due is not None and time.monotonic() >= self.equip_due and not busy()):
                 self.between_fish(busy, 'equip', 'putting %s back on' % self.equip_aura, self.equip_turn)
@@ -2626,7 +2802,7 @@ class App:
                 if self.fisher:
                     self.fisher.lost()
             if self.fisher is not None and not busy():
-                if self.fisher.pause and not self.fisher.line_out:      # stale: what asked isn't due (biome ended)
+                if self.fisher.pause and not self.fisher.line_out:
                     self.fisher.pause, self.fisher.recast = False, self.fisher.at_spot
                 try:
                     self.fisher.step(busy, LOOK_EVERY_S * 4)
@@ -2649,6 +2825,8 @@ class App:
             self.nap(LOOK_EVERY_S)
 
         game.release_all()
+        self.stats_turn(final=True)
+        STATS_HOOK = None
         if self.restart_run:
             note('run', 'run_end reason=stall')
             return
@@ -2704,7 +2882,7 @@ class App:
                 if go > 1:
                     if not fishing.respawn(halt):
                         return False
-                    self.in_dimension = False           # a reset leaves Eden's dimension
+                    self.in_dimension = False
                 if not self.in_dimension and not self.use_crack(halt, 'the Eden walk starts at its spawn (go %d)' % go):
                     return False
                 if not game.align_camera(halt):
@@ -2753,7 +2931,7 @@ class App:
                     except Exception:
                         pass
             if time.monotonic() - self.beat > STALL_S * game.LIMIT and not self.restart_run and not game.ABORT:
-                # stuck on something that never ends: abort, _guard restarts it
+                # never ends: abort, _guard restarts it
                 mins = round(STALL_S * game.LIMIT / 60)
                 note('run', 'ERROR run_stalled idle_s=%d action=restart' % round(STALL_S * game.LIMIT))
                 self.tell('Macro stuck', 'No progress for %d minutes, restarting the run' % mins, EMBED_BAD)
@@ -2772,9 +2950,9 @@ class App:
         watch = self.watch or game.Watch()
         why = watch.trouble(quiet_s=float('inf'))
         if why and game.roblox_running() and game.find_play() is None:
-            # old disconnect lines can be hours old; no Play button means we're in
+            # old disconnect lines; no Play button = in game
             note('run', 'WARN stale_disconnect why="%s" in_game=true action=start' % why)
-            why = watch.state = watch.dropped = None        # or the connection watcher rejoins on the same old line
+            why = watch.state = watch.dropped = None        # else the watcher rejoins on the old line
         if why:
             self.need_rejoin = why
             if not self.reconnect():
@@ -2855,7 +3033,7 @@ class App:
         """Reconnect off: wait for the game to come back, pressing Play. False on Stop."""
         note('connection', 'WARN reconnect_off action=wait_for_game reason="%s"' % why)
         self.tell('Disconnected', 'Auto Reconnect is disabled', EMBED_BAD, 'Connection')
-        clicked, watch = 0.0, game.Watch()          # reused: each poll reads only new lines
+        clicked, watch = 0.0, game.Watch()
         while self.nap(5):
             if not game.roblox_running():
                 continue
@@ -2980,9 +3158,9 @@ class App:
         try:
             if self.fisher is not None and not fishing.respawn(halt):
                 return
-            game.tilt_up(halt)                          # look down from above while at the merchant
+            game.tilt_up(halt)
             got = shop.collect(name, self.wanted, halt, say)
-            moved = got is not False                    # no teleport: still where we were, no crack needed
+            moved = got is not False                    # no teleport: no crack needed
             if not got:
                 if not halt() and getattr(self, 'merchant_tries', MERCHANT_TRIES) >= MERCHANT_TRIES:
                     self.tell("Could not open %s's shop" % name, shop.why or 'The shop did not open',
@@ -3001,20 +3179,20 @@ class App:
         except Exception as e:
             say('ERROR collect_failed type=%s msg="%s"' % (type(e).__name__, e))
             self.tell('Merchant collection failed', '`%s: %s`' % (type(e).__name__, e), EMBED_BAD, 'Merchant')
-            self.merchant_tries = MERCHANT_TRIES                # an error is not worth a second go
+            self.merchant_tries = MERCHANT_TRIES                # errors get no second go
             try:
-                shop.close_shop()                       # an open shop blocks the walk back
+                shop.close_shop()
             except Exception:
                 pass
             self.close_guis()
         finally:
-            if not halt():                              # undo the tilt: reset, then square the camera
+            if not halt():
                 if moved:
                     fishing.respawn(halt)
                 game.align_camera(halt)
             if moved:
-                self.in_dimension = False               # the teleporter leaves Eden's dimension
-                # the crack waits while the loop is about to try this merchant again
+                self.in_dimension = False
+                # the crack waits if this merchant is retried
                 if self.crack_on and not halt() and (got or self.merchant_tries >= MERCHANT_TRIES):
                     self.use_crack(halt, 'back to Eden\'s dimension after %s' % name)
 
@@ -3051,7 +3229,7 @@ class App:
             else:
                 if self.fisher.line_out:
                     self.fisher.reel_in(halt)
-                # the catch or Fishing Failed window can show a few seconds late
+                # result window can show late
                 end = time.monotonic() + LATE_RESULT_S
                 while time.monotonic() < end and not halt():
                     st = fishing.window_state()
@@ -3082,7 +3260,7 @@ class App:
         if self.fisher and fishing.window_state() == 'catch':
             fishing.close_catch(halt)
         game.INTERRUPT = self.dropped
-        self.beat = time.monotonic()                        # one pass can hold several long turns
+        self.beat = time.monotonic()
         try:
             work()
         finally:
@@ -3100,7 +3278,7 @@ class App:
                         or self.pop_due is not None)
 
         def logged(since):
-            name, at = self.aura_logged             # lines from before this run don't count
+            name, at = self.aura_logged
             return bool(name) and clipper.norm(name) == clipper.norm(aura) and at >= max(since, self.run_wall)
 
         def other(since):
@@ -3127,7 +3305,7 @@ class App:
             if self.equip_fails == 1:
                 self.tell('Could not equip %s' % aura, 'Trying again in %d minutes' % (wait // 60), EMBED_BAD, 'Aura')
         else:
-            self.equip_due = time.monotonic()           # check again after
+            self.equip_due = time.monotonic()
 
     def rune_biome_changed(self, name):
         """A picked biome started: a Cursed Rune Fragment is due after the set time. Any other cancels it."""
@@ -3161,11 +3339,11 @@ class App:
                 name = None if self.at_cauldron else crafter.crafted_name()
                 if name is None:
                     up = False
-                    if crafter.last_words and not heard:        # once per notification, so its real words are known
+                    if crafter.last_words and not heard:
                         note('craft', 'DEBUG notification_not_crafted text="%s"' % crafter.last_words)
                     heard = bool(crafter.last_words)
                 elif not up and time.monotonic() - self.craft_posted > CRAFT_POSTED_S:
-                    up = True                                   # one post per notification
+                    up = True
                     shot = crafter.toast_png()
                     note('craft', 'crafted_notification item="%s"' % (name or 'unreadable'))
                     stage = self.craft_stage
@@ -3174,9 +3352,27 @@ class App:
                     else:
                         owed = owed or (name in ('Heavenly Potion', '') and stage == 'buy')
                         self.tell('Crafted', name or 'a potion', EMBED_GOOD, 'Craft', shot=shot)
+                        if self.craft_list and stage is None:
+                            self.craft_again_for(name, 'crafted_notification')
             except Exception as e:
                 note('craft', 'ERROR crafted_check_failed type=%s msg="%s"' % (type(e).__name__, e))
             time.sleep(0.5)
+
+    def craft_again_for(self, name, why):
+        """An Auto craft item was crafted: one item is visited again now; with several, the crafted one gets an extra
+        visit to add everything if 'Add all after item crafted' is on."""
+        if len(self.craft_list) == 1:
+            self.craft_due = time.monotonic()
+            note('craft', 'craft_revisit item="%s" reason=%s' % (self.craft_list[0], why))
+            return
+        item = next((n for n in self.craft_list if name and (n == name or crafter.base(n) == name)), None)
+        if not self.craft_readd.get():
+            return
+        if item is None:
+            note('craft', 'WARN craft_revisit_skipped crafted="%s" reason=not_in_list' % (name or 'unreadable'))
+            return
+        self.craft_again = item
+        note('craft', 'craft_revisit item="%s" reason=%s' % (item, why))
 
     def crafted(self, shot=None):
         """A Heavenly Potion was crafted: Lucky Potions on a sell trip soon, else a buy trip."""
@@ -3206,12 +3402,12 @@ class App:
         elif not halt():
             short = type(self.fisher.bought) is int     # 0, not False
             self.craft_short = self.craft_short + 1 if short else 0
-            wait = CRAFT_RETRY_S * min(2 ** max(0, self.craft_short - 1), 6)    # short again: 10, 20, 40, 60 min
+            wait = CRAFT_RETRY_S * min(2 ** max(0, self.craft_short - 1), 6)    # 10, 20, 40, 60 min
             note('craft', 'WARN lucky_buy_failed reason="%s" attempt=%d retry_s=%d'
                  % ('not enough fish points or sold out' if short else 'the shop did not answer', self.craft_short,
                     wait))
             self.craft_at = time.monotonic() + wait
-            self.fisher.bought = self.fisher.to_buy = None      # next goes are buy trips
+            self.fisher.bought = self.fisher.to_buy = None
 
     def to_cauldron(self, halt):
         """Reset, walk to Stella and open her screen; a walk that ends somewhere else is walked once more."""
@@ -3226,7 +3422,7 @@ class App:
                 return True
             else:
                 why = 'E at the end of the walk opened nothing (the walk went off course)'
-                fishing.points.leave_dialogue(skip=True)    # E by Stella herself opens her talk, which stays up
+                fishing.points.leave_dialogue(skip=True)    # E on Stella opens her talk
             if halt():
                 return False
             note('craft', 'WARN cauldron_walk_failed attempt=%d/2 reason="%s"' % (go, why))
@@ -3236,7 +3432,7 @@ class App:
         say = lambda m: note('craft', m)
         hp = self.craft_stage == 'cauldron'
         if self.fisher:
-            self.fisher.lost()                          # walks back to the spot after
+            self.fisher.lost()
         self.at_cauldron = True
         try:
             if not self.to_cauldron(halt):
@@ -3251,12 +3447,16 @@ class App:
                 say('craft_result item="Heavenly Potion" result=%s' % got)
                 if got == 'crafted':
                     self.crafted(crafter.last_shot)
-                elif got == 'added':                    # Auto adds the rest as it comes; it's never visited again
+                elif got == 'added':                    # Auto adds the rest; no revisit
                     say('craft_pending item="Heavenly Potion" luckies=%d' % CRAFT_LUCKIES)
                     self.want_luckies()
                 elif not halt():
                     self.craft_at = time.monotonic() + CRAFT_RETRY_S
-            if self.craft_list and self.craft_due is not None and time.monotonic() >= self.craft_due:
+            again, self.craft_again = getattr(self, 'craft_again', None), None
+            if again:
+                got = crafter.auto_start(halt, again, say)
+                say('craft_result item="%s" result=%s reason=add_all_after_crafted' % (again, got))
+            elif self.craft_list and self.craft_due is not None and time.monotonic() >= self.craft_due:
                 name = self.craft_list[self.craft_turn % len(self.craft_list)]
                 got = crafter.auto_start(halt, name, say)
                 say('craft_result item="%s" result=%s next_min=%d' % (name, got, self.craft_minutes()))
@@ -3266,22 +3466,24 @@ class App:
                 if got:
                     self.craft_turn += 1
                 if got and len(self.craft_list) == 1 and self.craft_stage is None:
-                    self.craft_due = None               # its Auto keeps adding and crafting by itself
-                    say('craft_auto_kept item="%s" revisit=after_rejoin' % name)
-                elif got or not halt():                 # a failed one waits its turn too, not a trip every 10 min
+                    self.craft_due = None               # back once its crafted notification shows
+                    say('craft_wait item="%s" until=crafted_notification' % name)
+                elif got or not halt():                 # failed: waits its turn too
                     self.craft_due = time.monotonic() + self.craft_minutes() * 60
+                if got == 'crafted' and self.craft_stage is None:
+                    self.craft_again_for(name, 'crafted_on_visit')
                 if self.craft_stage is not None and name != 'Heavenly Potion' and not halt():
                     crafter.auto_back(halt, 'Heavenly Potion', say)     # its Auto took the cauldron's one Auto
         except game.NotFocused as e:
             say('WARN cauldron_skipped reason="%s"' % e)
         finally:
-            try:                                        # shut it even for a merchant or pop: a reset leaves it up
+            try:                                        # a reset leaves it up
                 crafter.close(lambda: game.ABORT or self.need_rejoin is not None)
                 fishing.points.leave_dialogue(skip=True)    # and Stella's talk, if E opened that
             except Exception:
                 pass
             self.at_cauldron = False
-            if halt():                                  # cut off (Roblox gone, merchant): not straight back after
+            if halt():                                  # cut off: not straight back
                 later = time.monotonic() + CRAFT_RETRY_S
                 if self.craft_due is not None:
                     self.craft_due = max(self.craft_due, later)
@@ -3292,7 +3494,7 @@ class App:
         """Walk to Memory Match and play it, or read when it's back; a started game stops only for Stop or a rejoin."""
         say = lambda m: note('memory', m)
         if self.fisher:
-            self.fisher.lost()                          # walks back to the spot after
+            self.fisher.lost()
         route = craftpath.MEMORY if self.fish_vip.get() else craftpath.MEMORY_FREE
         got = None, 'the walk was cut short'
         try:
@@ -3301,7 +3503,7 @@ class App:
         except game.NotFocused as e:
             got = None, str(e)
         if self.crack_on:
-            self.in_dimension = False                   # the reset left Eden's dimension
+            self.in_dimension = False
             if not busy():
                 self.use_crack(busy, 'back to Eden\'s dimension after Memory Match')
         if got[0] == 'played':
@@ -3319,7 +3521,7 @@ class App:
                 self.memory_next(MEMORY_RETRY_S)
             say('memory_not_ready retry_s=%s' % (int(left) if left else 'unread'))
         elif busy():
-            self.memory_due = time.monotonic()          # straight after the merchant, pop or rejoin
+            self.memory_due = time.monotonic()
         else:
             self.memory_fails += 1
             wait = MEMORY_RETRY_S * min(2 ** (self.memory_fails - 1), 8)
@@ -3348,7 +3550,7 @@ class App:
             say('ERROR rune_failed type=%s msg="%s"' % (type(e).__name__, e))
             self.close_guis()
         if not used and self.dropped():
-            return                                      # still due
+            return
         self.rune_tries += 1
         if used:
             self.rune_due = None
@@ -3395,7 +3597,7 @@ class App:
             say('WARN pop_stopped reason=biome_over biome="%s" now="%s"' % (pretty(biome),
                                                                           pretty(self.biome_now) or 'unknown'))
         elif left and halt() and not game.ABORT and self.pop_due is None:
-            self.pop_left, self.pop_due = (biome, left), biome      # a rejoin cut it short: finish once back in
+            self.pop_left, self.pop_due = (biome, left), biome      # rejoin cut it short: finish later
             say('WARN pop_interrupted left=[%s] resume=after_rejoin' % ','.join(left))
         if used:
             self.tell('Popped in %s' % pretty(biome), ', '.join(used), biome_colour(biome), 'Pop')
@@ -3420,7 +3622,7 @@ class App:
         self.selector_refused = self.selector_refused + 1 if outcome == 'refused' else 0
         missed = outcome in ('no selector', 'no drive')        # a lost key or a cutscene does this too
         self.selector_missed = getattr(self, 'selector_missed', 0) + 1 if missed else 0
-        if missed:                                              # back off, never give up: 5, 10, 20, 40, 60 min
+        if missed:                                              # back off: 5-60 min, never give up
             wait = min(SELECTOR_RETRY_S * 2 ** (self.selector_missed - 1), 60 * 60)
             self.selector_due = now + wait
             what = 'No Biome Selector found in the Inventory' if outcome == 'no selector' else \
@@ -3464,7 +3666,7 @@ class App:
             return False
         try:
             got = game.item_pass(say=say, terms=due)
-            done = time.monotonic()                     # the cooldown starts at Use, not when the pass began
+            done = time.monotonic()                     # cooldown starts at Use
             cut = self.dropped()
             tried = [t for t in due if t in got or not cut]
             for t in tried:

@@ -15,25 +15,25 @@ TERM = 'biome selector'
 DRIVES = {'STARFALL': 'Radiant Star Drive', 'HELL': 'Infernal Flame Drive', 'NULL': 'Unknown Void Drive',
           'CORRUPTION': 'Corrupt Ruin Drive', 'SAND STORM': 'Golden Dune Drive', 'SNOWY': 'Chilling Frost Drive',
           'RAINY': 'Abyss Curse Drive', 'WINDY': 'Raging Gale Drive', 'HEAVEN': 'Angelic Hymn Drive'}   # list order
-COLOURS = {'Radiant Star Drive': (28, 115, 255), 'Infernal Flame Drive': (255, 55, 55),     # row border, and Confirm's
-           'Unknown Void Drive': (255, 255, 255), 'Corrupt Ruin Drive': (151, 46, 255),    # once picked
+COLOURS = {'Radiant Star Drive': (28, 115, 255), 'Infernal Flame Drive': (255, 55, 55),     # row border, and Confirm's once picked
+           'Unknown Void Drive': (255, 255, 255), 'Corrupt Ruin Drive': (151, 46, 255),
            'Golden Dune Drive': (255, 188, 134), 'Chilling Frost Drive': (158, 236, 255),
            'Abyss Curse Drive': (88, 155, 255), 'Raging Gale Drive': (138, 255, 189),
            'Angelic Hymn Drive': (255, 206, 128)}
 COLOUR_TOL = 12          # Golden Dune and Angelic Hymn are only 18 apart
 EVERY_S = 60 * 60
-RECHARGE_S = 3600        # "RECHARGING... n%" counts down from an hour
-AREA = (0.27, 0.26, 0.73, 0.74)     # window area on the client, with room to bob
-OPEN_S = 3.5             # title types in, Drives appear one by one
-CONFIRM_S = 1.5          # "Are you sure?" types in, then Confirm grows in
-APPLY_S = 9.0            # animation, then the window closes itself
-LATE_S = (4.0, 4.0, 4.0)  # lag keeps it up longer; a refusal keeps it up for good
-NEAR_S = 5 * 60          # a recharge this close to done is read again in case of a misread digit
-SCROLLS = 3              # the last Drives sit past the bottom of the list
-OCR_ROWS = 700           # small screens are scaled up to this many rows for OCR
-REACH = 0.025            # largest bob + shake, as a share of the screen height
+RECHARGE_S = 3600        # counts down from an hour
+AREA = (0.27, 0.26, 0.73, 0.74)
+OPEN_S = 3.5             # title types in, Drives one by one
+CONFIRM_S = 1.5          # prompt types in, then Confirm grows in
+APPLY_S = 9.0            # animation, then it closes
+LATE_S = (4.0, 4.0, 4.0)  # lag delays it; a refusal keeps it up
+NEAR_S = 5 * 60          # near done: re-read in case of a misread digit
+SCROLLS = 3              # last Drives sit below the list
+OCR_ROWS = 700
+REACH = 0.025            # max bob + shake, share of screen height
 
-_ref = None              # (screen box, title edges, reach) from the last read
+_ref = None
 
 
 def squash(text):
@@ -65,7 +65,7 @@ def read(want=None, picked=None):
     title = [q for q in lines if squash(q[0]) == 'biomeselector']
     if title:
         x, y, W, H = title[0][1] - l, title[0][2] - t, (r - l) / 0.46, (b - t) / 0.48
-        hy, hx = int(0.02 * H) + 2, int(0.45 * 1.75 * min(0.38 * H, 0.38 * W / 1.75))   # whole title bar
+        hy, hx = int(0.02 * H) + 2, int(0.45 * 1.75 * min(0.38 * H, 0.38 * W / 1.75))
         hx = min(hx, x, img.shape[1] - x)
         if hy <= y < img.shape[0] - hy and hx > 20:
             _ref = ((l + x - hx, t + y - hy, l + x + hx, t + y + hy), edges(img[y - hy:y + hy, x - hx:x + hx]),
@@ -91,11 +91,11 @@ def seen(img, left, top, want=None, picked=None):
 
 def percent(img, x0, y0, x1, y1):
     """'RECHARGING... n%' from OCR of the number. None if OCR missed the '%'."""
-    adv, h = (x1 - x0) / 13.5, y1 - y0                       # 13 letters, all as wide
+    adv, h = (x1 - x0) / 13.5, y1 - y0
     crop = img[max(0, int(y0 - 0.3 * h)):int(y1 + 0.3 * h), max(0, int(x1 - 0.5 * adv)):int(x1 + 5.5 * adv)]
     if crop.size == 0:
         return None
-    k = 48 / crop.shape[0]                                  # OCR reads digits best about this tall
+    k = 48 / crop.shape[0]
     crop = np.asarray(Image.fromarray(crop).resize((max(1, int(crop.shape[1] * k)), 48), Image.LANCZOS))
     crop = np.pad(crop, ((10, 10), (10, 10), (0, 0)), mode='edge')
     result, _ = merchant.reader()(np.ascontiguousarray(crop[..., ::-1]), use_cls=False)
@@ -249,7 +249,7 @@ def cancel():
 
 def scroll(at, notches):
     game.move_to(*at)
-    for _ in range(abs(notches)):                       # one notch at a time
+    for _ in range(abs(notches)):
         game._mouse(0x0800, data=-120 if notches > 0 else 120)
         game.paced(0.05)
 
@@ -322,7 +322,7 @@ def use(biome, halt, say):
     if halt() or not press(hit[1], hit[2], colour):
         shut()
         return 'stopped', None
-    left = (lx + lw * 0.15, lx + lw * 0.49)                 # Confirm is the left one of the pair
+    left = (lx + lw * 0.15, lx + lw * 0.49)
     ok = None
     for _ in range(3):                                      # slower when Roblox lags
         if not merchant.nap(CONFIRM_S, halt):

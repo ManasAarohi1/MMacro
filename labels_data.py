@@ -707,7 +707,7 @@ ADV = {    # advance width in em
     'Cannot Fish': 6.0973,
     'You do not have enough inventory space.': 20.5228,
 }
-CHARS = {    # where each letter starts in the mask, and where the last one ends
+CHARS = {    # letter starts in the mask, plus the last end
     'BIOME SELECTOR': [4.0, 32.8, 61.6, 90.4, 119.2, 148.1, 176.9, 205.7, 234.5, 263.3, 292.1, 320.9, 349.8, 378.6, 407.4],
     'Confirm': [4.0, 32.8, 61.6, 90.4, 119.2, 148.1, 176.9, 205.7],
     'RECHARGING...': [4.0, 32.8, 61.6, 90.4, 119.2, 148.1, 176.9, 205.7, 234.5, 263.3, 292.1, 320.9, 349.8, 378.6],

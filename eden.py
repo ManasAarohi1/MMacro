@@ -10,14 +10,14 @@ import game
 
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 POINTS = (('contract', 'Eden: Contract button'),)
-SHOWS = 0.75             # match score for Eden
-SIGNED = 0.8             # match score for the contract
-SAME = 0.98              # screen this close to the last one isn't searched again
-LOOK_EVERY_S = 3.0       # a search is costly and Eden stays for minutes
+SHOWS = 0.75
+SIGNED = 0.8
+SAME = 0.98              # this similar to the last: not searched again
+LOOK_EVERY_S = 3.0       # searches are costly; Eden lasts minutes
 SCALES = np.linspace(0.5, 1.5, 20)
-SETTLE_S = 25.0          # wait after Eden shows, before walking
+SETTLE_S = 25.0          # after Eden shows, before walking
 TALK_S = 5.0             # after E, before the Contract button
-CONTRACT_S = 50.0        # longest to wait for the signed contract
+CONTRACT_S = 50.0        # max wait for the signed contract
 COOLDOWN_S = 60.0        # after Eden, before looking again
 RECORD_S = 60
 # Portable Crack spawn -> Eden, camera squared by Collection first

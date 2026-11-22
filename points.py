@@ -22,9 +22,9 @@ NAMES = {(2560, 1440): '1440p fullscreen', (2560, 1369): '1440p windowed', (1920
          (1920, 1009): '1080p windowed', (1366, 768): '768p fullscreen', (1366, 697): '768p windowed'}
 
 
-WINDOWS = ('auraStorage', 'inventory', 'dailyRewards')     # buttons inside a centred window sized by width
-TOPBAR = 58                                                 # Roblox top-bar height, not scaled with the window
-FRAMES = {      # windows with a fixed shape, (left, top, width) on a w x h client
+WINDOWS = ('auraStorage', 'inventory', 'dailyRewards')     # buttons in a centred, width-scaled window
+TOPBAR = 58                                                 # Roblox top bar, not scaled
+FRAMES = {      # fixed-shape windows: (left, top, width) on a w x h client
     'merchantShop': lambda w, h: (0.95 * w - min(w / 2, h * 1.15), h / 2 - min(w / 2, h * 1.15) / 4.6,
                                   min(w / 2, h * 1.15)),
     'dialogue': lambda w, h: (w / 2 - min(w / 2, h * 0.27 * 3.031) / 2, 0.625 * h, min(w / 2, h * 0.27 * 3.031)),
@@ -71,14 +71,14 @@ def box(name):
     if w is None:
         return None
     x0, y0, cw, ch = game.client_rect(w)
-    if cw <= 0 or ch <= 0:                      # minimised
+    if cw <= 0 or ch <= 0:
         return None
     s = game.window_scale(w)
-    own = (round(cw / s), round(ch / s))        # the size Roblox lays out at, before DPI stretch
+    own = (round(cw / s), round(ch / s))        # Roblox layout size, before DPI stretch
     size = own if own in _sizes() else _nearest(*own)
     l, t, bw, bh = _sizes()[size][name]
     if name.startswith(WINDOWS) and own not in _sizes():
-        # that window is half the client wide and keeps its shape, so width sets the scale
+        # half the client wide, fixed shape: width sets the scale
         s = cw / size[0]
         y = lambda v: y0 + ch / 2 + (v - size[1] / 2) * s
         return round(x0 + l * s), round(y(t)), round(x0 + (l + bw) * s), round(y(t + bh))
@@ -93,7 +93,7 @@ def box(name):
         size = own
     sx, sy = cw / size[0], ch / size[1]
     if name.startswith('collection') and own not in _sizes():
-        # Collection sits below the top bar, which keeps its height
+        # Collection sits below the fixed-height top bar
         bar = TOPBAR * s
         y = lambda v: round(y0 + bar + (v - TOPBAR) * (ch - bar) / (size[1] - TOPBAR))
         return round(x0 + l * sx), y(t), round(x0 + (l + bw) * sx), y(t + bh)
@@ -135,7 +135,7 @@ def choice(colour):
     mask = (main >= 120) & (main > a + 40) & (main > c + 40)
     if mask.sum() < 30:
         return None
-    # biggest patch only, so an aura glow doesn't drag the point off
+    # biggest patch only: an aura glow can't drag it
     patches = game._group(mask, (b[0], b[1]), 6, 12, 30)
     return (int(patches[0][0]), int(patches[0][1])) if patches else None
 
@@ -149,7 +149,7 @@ def leave_dialogue(tries=3, gap=0.3, skip=False):
     """Press Leave until the dialogue is gone; `skip` clicks "Click to skip" first (no shop open)."""
     pressed = False
     for n in range(tries):
-        at = choice('red') if dialogue_up() else None       # red alone is an aura or a biome, not Leave
+        at = choice('red') if dialogue_up() else None       # red alone is an aura or biome, not Leave
         if at is None:
             if pressed:
                 print('dialogue_gone presses=%d' % n)

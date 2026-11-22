@@ -15,12 +15,12 @@ import numpy as np
 import game
 
 FPS = 20
-BEFORE_S = 90            # the log only shows the aura after its cutscene
+BEFORE_S = 90            # log shows the aura after its cutscene
 AFTER_S = 30
 HEIGHTS = {'768p': 768, '1080p': 1080, '1440p': 1440, '4K': 2160}     # two minutes of frames in memory
 HEIGHT = 768
 QUALITY = 75
-SHOT_S = 5               # embed picture is from this long before the log line
+SHOT_S = 5               # embed picture from this long before the log line
 CLIP_DIR = os.path.join(game.APP_DIR, 'clips')
 
 _table = None
@@ -36,7 +36,7 @@ def biome_key(name):
 
 _names = None
 AURAS_URL = 'https://raw.githubusercontent.com/ManasAarohi1/MMacro/main/auras.json'
-LIVE = os.path.join(game.APP_DIR, 'auras.json')     # the last list fetched from GitHub
+LIVE = os.path.join(game.APP_DIR, 'auras.json')
 
 
 def _read(body):
@@ -140,7 +140,7 @@ def parse_keys(text):
     elif re.fullmatch(r'[a-z0-9]', key):
         vk = ord(key.upper())
     elif re.fullmatch(r'key[0-9a-f]{2}', key):
-        vk = int(key[3:], 16)                    # unnamed key, as key_name() writes it
+        vk = int(key[3:], 16)
     else:
         raise ValueError('%s: %r is not a key this knows' % (text, key))
     if vk in (0x70, 0x71):
@@ -185,7 +185,7 @@ def capture_keys(timeout=15.0, down=None):
         if held and not now and combo_text(held):
             return combo_text(held)
         if held and not now:
-            held = []                           # only modifiers, wait for a real key
+            held = []                           # modifiers only: wait for a real key
         time.sleep(0.02)
     return None
 
@@ -201,7 +201,7 @@ def press_keys(text):
                                          time=0, dwExtraInfo=0))
         game.u32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
-    with game.INPUT_LOCK:                   # keep the macro's own input out of the middle
+    with game.INPUT_LOCK:                   # keep macro input out of the middle
         try:
             for code in mods + [vk]:
                 send(code, False)
@@ -237,7 +237,7 @@ class Clipper:
         self.frames = collections.deque(maxlen=fps * keep_s)
         self.stop_event = threading.Event()
         self.thread = None
-        self.saves, self.lock = 0, threading.Lock()     # clips still waiting out AFTER_S
+        self.saves, self.lock = 0, threading.Lock()
 
     def start(self):
         if self.thread is None or not self.thread.is_alive():
@@ -258,6 +258,8 @@ class Clipper:
                                            [cv2.IMWRITE_JPEG_QUALITY, QUALITY])
                     if ok:
                         now = time.time()
+                        if self.frames and np.array_equal(self.frames[-1][1], jpg):
+                            jpg = self.frames[-1][1]        # unchanged screen: kept once
                         self.frames.append((now, jpg))
                         while self.frames[0][0] < now - self.keep_s:
                             self.frames.popleft()
@@ -298,7 +300,7 @@ class Clipper:
                 os.makedirs(CLIP_DIR, exist_ok=True)
                 name = re.sub(r'[^\w\- ]', '', label).strip().replace(' ', '_') or 'aura'
                 path = os.path.join(CLIP_DIR, '%s_%s.mp4' % (time.strftime('%Y%m%d_%H%M%S'), name))
-                fps = max(1.0, (len(frames) - 1) / max(0.1, frames[-1][0] - frames[0][0]))   # the real capture rate
+                fps = max(1.0, (len(frames) - 1) / max(0.1, frames[-1][0] - frames[0][0]))
                 first = cv2.imdecode(frames[0][1], cv2.IMREAD_COLOR)
                 h, w = first.shape[:2]
                 out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))

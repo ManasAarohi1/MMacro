@@ -10,16 +10,14 @@ from urllib.request import pathname2url
 
 NAMES = ('Mari', 'Jester', 'Rin', 'Boss', 'Sinister P.')
 _ADDRESS = re.compile(rb'/(?:v\d+/)?sc\d+/([0-9a-f]{32})')
-# each merchant's learned addresses and file cache keys
+# learned addresses and cache keys per merchant
 ADDRESSES = {'Mari': {'e19e08c3454fe2d8fac8d447434a7c16'},
              'Jester': {'7a41a0002e8294562cd0ac3048386152'},
              'Rin': {'6a3e15a8e4d909486bc445bdb8fe4996'},
              'Boss': {'16daaac736fd49a9bb3782f99f0b29d2', 'b602b26ec2d128fc9e9c869ad18c8cc2'},
              'Sinister P.': {'2c71e2ca0bf1100136e35e13d0be62cb', '5b548b0e49c00ea267211f5d68edd81f',
-                             '699d26fb0d2f9bd7ab2a9912522783ce', '6f2200e4afaf78a44b52be2bd8bdf1b2',
-                             '8bfaac946e9e2911cb8334b8f1f30237', '971d01a7f1aa9c0430810f0d2735daf9',
-                             'd4153668107c33ab19d881f74ce35cdc', 'ec371ddec207b782654fc227e53fe48d',
-                             'f4522e8554bb80911e72139810b3abff', 'fba51d46fae18fa53e7f97c920c4ef2c'}}
+                             '699d26fb0d2f9bd7ab2a9912522783ce', '8bfaac946e9e2911cb8334b8f1f30237',
+                             'ec371ddec207b782654fc227e53fe48d', 'f4522e8554bb80911e72139810b3abff'}}
 FILES = {'Mari': {'3322c570efc137a477a1e2f04bb39fe7'},
          'Jester': {'1fc3405b9963491cf03fd7b5f89b801b'},
          'Rin': {'25f70ebc3654f26af69047a7d941c859'},
@@ -129,7 +127,7 @@ def record(body):
             + struct.pack('<6I', 200, 0, 0, len(body), xxh32(body) if body else 0, 0) + body)
 
 
-# valid checksums but not an animation, so it fails to load
+# valid but not an animation: fails to load
 BLOCKED = record(b'MMacro: this merchant animation is blocked so every visit is seen\n')
 
 
@@ -160,11 +158,11 @@ def block(keys, path):
     if not todo:
         return {}
     wrote = {}
-    con = sqlite3.connect('file:%s?mode=rw' % pathname2url(path), uri=True, timeout=5)    # never creates one
+    con = sqlite3.connect('file:%s?mode=rw' % pathname2url(path), uri=True, timeout=5)
     try:
         for key in todo:
             k = bytes.fromhex(key)
-            # keep its atime, so any later stamp is Roblox reading it
+            # keep its atime: a later stamp means Roblox read it
             if con.execute('UPDATE files SET content = ?, size = ? WHERE id = ? AND category = 10',
                            (BLOCKED, len(BLOCKED), k)).rowcount:
                 wrote[key] = now_read[key][0] if key in now_read else None
@@ -174,9 +172,9 @@ def block(keys, path):
                             'VALUES (?, ?, ?, 0, ?, 10, ?, 0)', (k, BLOCKED, len(BLOCKED), now, now))
                 wrote[key] = None
             else:
-                continue                # some other kind of row under this key, leave it
+                continue                # other row kind, leave it
             con.commit()
-            try:                        # drop the old file on disk, the row holds the content now
+            try:                        # drop the old disk file; the row holds it now
                 os.remove(os.path.join(os.path.dirname(path), 'rbx-storage', key[:2], key))
             except OSError:
                 pass
@@ -204,11 +202,11 @@ class Tracker:
     """Watches the cache for merchants that just came."""
 
     def __init__(self, path=None, now_ms=None):
-        self.path = path                    # None = find it ourselves
+        self.path = path
         self.found, self.found_at = None, 0.0
         self.since = int(time.time() * 1000) if now_ms is None else now_ms
-        self.file_read = {}                 # blocked file key -> when Roblox last read it
-        self.ours = set()                   # file keys holding a block record right now
+        self.file_read = {}                 # blocked key -> when Roblox last read it
+        self.ours = set()
         self.lock = threading.Lock()
 
     def cache(self):
@@ -271,7 +269,7 @@ if __name__ == '__main__':
     assert Tracker(db, now_ms=500).poll({'P': {image}}, {}) == ['P']     # any kind of asset counts
     con.close()
 
-    # block: existing row replaced, missing one added, every visit seen
+    # block: replace existing, add missing, see every visit
     con = sqlite3.connect(db)
     k1, k2 = '3322c570efc137a477a1e2f04bb39fe7', '25f70ebc3654f26af69047a7d941c859'
     con.execute('INSERT INTO files (id, content, size, atime, category) VALUES (?, NULL, 35829, 1000, 10)',
@@ -281,7 +279,7 @@ if __name__ == '__main__':
     open(os.path.join(d, 'rbx-storage', k1[:2], k1), 'wb').write(b'RBXH real animation')
     files = {'Mari': {k1}, 'Rin': {k2}, 'Jester': set()}
     t = Tracker(db, now_ms=10 ** 13)
-    assert t.poll({}, files) == []                                  # baseline
+    assert t.poll({}, files) == []
     assert block({k1, k2}, db) == {k1: 1000, k2: None} and block({k1, k2}, db) == {}
     assert not os.path.exists(os.path.join(d, 'rbx-storage', k1[:2], k1))
     assert all(mark == 1 for _, mark in reads({k1, k2}, db).values())

@@ -8,18 +8,17 @@ from PIL import Image
 
 import labels_data
 
-YES = 0.6                # this good or better: it's there
-NO = 0.4                 # below this everywhere: it's not there
-MARGIN = 0.1             # and this much better than other words that could be in the same spot
-BIG = 32                 # bigger text is shrunk to about this first
-LOW, HIGH = 0.62, 1.45   # font size / box height: text fills ~0.6 to all of its box
-STEP = 1.1               # sizes tried first, then the best is refined in 2% steps
-SHARP = 1.0              # blur of the edges the letters are scored on
-SLACK = (2, 0.02)        # px, and share of the word's width, each letter run may sit off
-ROUGH = 14               # px the text is shrunk to for the first, rough look
-COVER = 0.5              # a match counts in full only if this share of its outline holds the colour, or its letters
-                         # stand out this much from the gaps between them
-NEAR = 40                # a pixel this far off a blend of fill and outline colour isn't text
+YES = 0.6                # at least this: present
+NO = 0.4                 # below this everywhere: absent
+MARGIN = 0.1             # and this much above rival words
+BIG = 32
+LOW, HIGH = 0.62, 1.45   # font size / box height range
+STEP = 1.1               # coarse sizes, then 2% steps
+SHARP = 1.0
+SLACK = (2, 0.02)        # letter run slack: px, share of width
+ROUGH = 14
+COVER = 0.5              # full credit needs this share of outline colour, or letter contrast
+NEAR = 40                # this far from a fill/outline blend: not text
 
 _masks, _cache = {}, {}
 
@@ -114,7 +113,7 @@ def scan(e, t):
     if t.shape[0] > e.shape[0] or t.shape[1] > e.shape[1] or t.size == 0:
         return -1.0, None
     r = cv2.patchNaNs(cv2.matchTemplate(e, t, cv2.TM_CCOEFF_NORMED), 0.0)
-    r[flat(e, t.shape)] = 0.0                       # no edges there: the score is noise over nothing
+    r[flat(e, t.shape)] = 0.0                       # no edges: score is noise
     _, v, _, at = cv2.minMaxLoc(r)
     return float(v), at
 
@@ -145,7 +144,7 @@ def pieces(e, name, px, f, at, ring):
     """Mean score of the word's letter runs, each looked for within a few px of where `at` puts it."""
     t = template(name, px, f, SHARP, ring)
     k = px / labels_data.REF
-    xs = [(x * k + 3) * f for x in labels_data.CHARS[name]]          # the template has 3 px of padding
+    xs = [(x * k + 3) * f for x in labels_data.CHARS[name]]          # template has 3 px padding
     slack = SLACK[0] + int(SLACK[1] * t.shape[1])
     total = weight = 0.0
     for a, b in chunks(name):
@@ -199,8 +198,8 @@ def find(img, name, pxs, box=None, plane=None, ring=False):
     if g.std() < 1.0:
         return top
     if ring and (g > 64).sum() < 0.2 * outline(name, min(pxs)) * f:
-        return top                                          # hardly any of its colour here: -1
-    fr = min(1.0, ROUGH / (min(pxs) * f))                  # the rough look is done at about ROUGH px
+        return top                                          # hardly any of its colour: -1
+    fr = min(1.0, ROUGH / (min(pxs) * f))
     for v, at, px in peaks(edges(resize(g, fr), 1.5), name, pxs, f * fr, ring):
         at = tuple(int(q / fr) for q in at)
         s = int(0.05 * (at[2] - at[0])) + int(2 / fr) + 6
@@ -238,7 +237,7 @@ def lit(g, name, px, f, at):
     win = g[at[1]:at[1] + m.shape[0], at[0]:at[0] + m.shape[1]]
     if win.shape != m.shape:
         return 0.0
-    return float((cv2.dilate(win, np.ones((3, 3), np.uint8))[m] > 64).mean())     # within 1 px
+    return float((cv2.dilate(win, np.ones((3, 3), np.uint8))[m] > 64).mean())
 
 
 def contrast(g, name, px, f, at):
@@ -319,8 +318,7 @@ DRIVES = {'Radiant Star Drive': (28, 115, 255), 'Infernal Flame Drive': (255, 55
           'Golden Dune Drive': (255, 188, 134), 'Chilling Frost Drive': (158, 236, 255),
           'Abyss Curse Drive': (88, 155, 255), 'Raging Gale Drive': (138, 255, 189),
           'Angelic Hymn Drive': (255, 206, 128)}
-PRIMARY, SECONDARY, WARN = (13, 36, 89), (134, 188, 255), (255, 131, 131)   # text fill, outline,
-                                                                            # warning outline
+PRIMARY, SECONDARY, WARN = (13, 36, 89), (134, 188, 255), (255, 131, 131)   # text fill, outline, warning outline
 
 
 def tinted(colour, base):
@@ -339,12 +337,12 @@ def selector(img, W, H, want=None, picked=None):
         return None
     h = min(0.38 * H, 0.38 * W / 1.75)
     w = 1.75 * h
-    sx, sy = 0.012 * W + 3, 0.025 * H + 3                   # shake, bob
+    sx, sy = 0.012 * W + 3, 0.025 * H + 3
     cx, cy = img.shape[1] / 2, img.shape[0] / 2
     pxs = sizes('BIOME SELECTOR', 0.95 * w, 0.075 * h)
     box = around('BIOME SELECTOR', pxs, cx - 0.025 * w, cy - 0.4625 * h, sx, sy)
     tries = [picked] if picked in DRIVES else []
-    tries = tries + [None] + [d for d in DRIVES if d not in tries]   # picking a Drive turns the window its colours
+    tries = tries + [None] + [d for d in DRIVES if d not in tries]   # a picked Drive recolours the window
     seen, v = -1.0, -1.0
     for d in tries:
         colour = (DRIVES[d], fill(DRIVES[d])) if d else (SECONDARY, PRIMARY)
@@ -352,24 +350,24 @@ def selector(img, W, H, want=None, picked=None):
         seen = max(seen, v)
         if v >= YES:
             break
-    if v < YES:                     # surely not up only when none of its colours is there; else let OCR look
+    if v < YES:                     # down only if none of its colours show; else OCR
         return [] if seen < 0 else None
-    r = px / (0.075 * h)                                    # this window's font size / box height
+    r = px / (0.075 * h)
 
     def near(name, bw, bh, extra=0.0):
         return [min(k * r * bh, bw / (labels_data.ADV[name] + extra)) for k in (0.92, 1.0, 1.08)]
 
     found = [('BIOME SELECTOR', at)]
-    mx, my = (at[0] + at[2]) / 2 + 0.025 * w, (at[1] + at[3]) / 2 + 0.4625 * h      # the window's middle now
+    mx, my = (at[0] + at[2]) / 2 + 0.025 * w, (at[1] + at[3]) / 2 + 0.4625 * h
     lx, ly, lw, lh = mx - 0.49 * w, my - 0.5 * h + 0.087 * h + 0.02 * 0.913 * h, 0.72 * w, 0.86 * 0.913 * h
     s = 0.01 * h + 3
     status_y = my + 0.5 * h - 0.02 * 0.913 * h - 0.0375 * 0.913 * h
-    calls = {}                    # the status line shows one of these; warnings are drawn in their own red
+    calls = {}                    # warnings use their own red
     for name, extra, c in (('RECHARGING...', 2.4, WARN), ('CONNECTION UNSTABLE', 0.0, WARN),     # 2.4 em: ' 75%'
                            ('BIOME SELECTOR IS READY TO BE USED', 0.0, colour[0]),
                            ('SENDING REQUEST...', 0.0, colour[0]), ('REQUEST SENT', 0.0, colour[0])):
         p = near(name, lw, 0.075 * 0.913 * h, extra)
-        x = lx + lw / 2 - extra * max(p) / 2           # the line is centred, so RECHARGING... sits left of the middle
+        x = lx + lw / 2 - extra * max(p) / 2           # centred line: RECHARGING... sits left
         calls[name] = find(img, name, p, around(name, p, x, status_y, s + 0.3 * max(p) * (extra > 0), s),
                            tinted(c, colour[1]), True)
     w1, w2 = calls['RECHARGING...'][0], calls['CONNECTION UNSTABLE'][0]
@@ -381,7 +379,7 @@ def selector(img, W, H, want=None, picked=None):
     elif warn >= NO and not (other >= YES and other - warn >= MARGIN):
         return None
     pxs = {name: near(name, 0.98 * lw, 0.1 * lh) + [min(r * 0.13 * lh, 0.98 * lw / (labels_data.ADV[name] + 1.2))]
-           for name in DRIVES}      # Drive row height, bigger when hovered
+           for name in DRIVES}
     boxes = [around(name, p, lx + lw / 2, ly + lh / 2, s, lh / 2 + s) for name, p in pxs.items()]
     box = tuple(int(pick(b[i] for b in boxes)) for i, pick in enumerate((min, min, max, max)))
     x0, y0 = max(0, box[0]), max(0, box[1])
@@ -396,17 +394,17 @@ def selector(img, W, H, want=None, picked=None):
     for v, name, y, at in sorted(hits, key=lambda q: q[0], reverse=True):
         if v < YES or any(abs(y - y2) < 0.06 * lh for y2 in rows):
             continue
-        rows.append(y)                                      # one Drive per row, and clearly that one
+        rows.append(y)
         close = [n for v2, n, y2, _ in hits if n != name and y2 is not None and abs(y2 - y) < 0.06 * lh
                  and v - v2 < MARGIN]
         if not close:
             found.append((name, at))
         elif want in close + [name]:
             return None
-    rw = 0.7 * lw                                           # Confirm: left of a 0.7 x 0.1 pair, 0.7 down the list
+    rw = 0.7 * lw                                           # Confirm: left of a 0.7 x 0.1 pair, 0.7 down
     p = near('Confirm', 0.48 * rw, 0.1 * lh)
     v, at, _ = find(img, 'Confirm', p, around('Confirm', p, lx + lw / 2 - 0.26 * rw, ly + 0.7 * lh, s, s),
-                    tinted(colour[0], (0, 0, 0)), True)    # Confirm's text is black
+                    tinted(colour[0], (0, 0, 0)), True)
     if v >= YES:
         found.append(('Confirm', at))
     elif want == 'Confirm' and call(v) is None:

@@ -40,10 +40,10 @@ DEFAULTS = {
     "low_end": False,
     "rejoin_browser": False,
     "eden_on": False,
-    "eden_ping": "",          # Discord user id to ping
+    "eden_ping": "",          # Discord id to ping
     "eden_record": False,     # record 60 s when Eden shows
-    "eden_path": True,        # walk to Eden and sign the contract
-    "merchant_on": False,     # spots merchants via Roblox's cache
+    "eden_path": True,        # walk to Eden, sign contract
+    "merchant_on": False,     # via Roblox's cache
     "collect_on": False,
     "collect_merchants": ["Jester", "Mari", "Rin"],
     "buy_items": {},
@@ -157,9 +157,9 @@ def time_from_line(line):
     return stamp.replace(tzinfo=datetime.timezone.utc).timestamp()
 
 
-TRAY_MARK = b"AppState/TrayMode"    # the tray icon writes its own player log
-GAME_MARK = b"! Joining game"       # a game opened from the tray keeps using it
-_tray = {}                          # path -> False (game log) or bytes searched so far
+TRAY_MARK = b"AppState/TrayMode"    # tray icon's own player log
+GAME_MARK = b"! Joining game"       # tray games keep using it
+_tray = {}                          # path -> False (game log) or bytes read
 
 
 def tray_log(path):
@@ -218,7 +218,7 @@ def newest_log(log_dir=LOG_DIR):
     return names[0] if names else None
 
 
-STUB_QUIET_S = 10        # quiet this long = dead (a launch stub handed off to the tray client)
+STUB_QUIET_S = 10        # quiet this long = dead launch stub
 
 
 def moved_on(latest, path, joined=False):
@@ -243,21 +243,21 @@ def follow(stop, log_dir=LOG_DIR, poll=1.0):
                     try:
                         new = open(latest, "r", encoding="utf-8", errors="replace")
                     except OSError:
-                        new = None                      # locked, try at the next listing
+                        new = None                      # locked, retry next listing
                     if new is not None:
                         if handle:
                             handle.close()
                         path, handle = latest, new
-                        if path in sizes:               # seen before: pick up where we left off
+                        if path in sizes:               # seen: resume
                             handle.seek(min(sizes[path], _stat(path, "st_size")))
-                        else:                           # new since we started: read it all (merchant on join)
+                        else:                           # new: read all (merchant on join)
                             handle.seek(0, os.SEEK_END if _stat(path, "st_ctime") < began else os.SEEK_SET)
                 sizes = {n: _stat(n, "st_size") for n in logs}
             line = None
             if handle:
                 at = handle.tell()
                 line = handle.readline()
-                if line and not line.endswith("\n"):     # half written, retry next time
+                if line and not line.endswith("\n"):     # half written, retry
                     handle.seek(at)
                     line = None
             yield line or None
@@ -270,9 +270,11 @@ def follow(stop, log_dir=LOG_DIR, poll=1.0):
 
 # ================================================================ window, keys and mouse
 STEP_DELAY = 0.06
-SETTLE_S = 0.3           # let menus settle
-PACE = 1.0               # PC speed slider, scales fixed waits and mouse travel: Fast PC 0.6 to Potato PC 2
-LIMIT = 1.0              # scales how long we wait for something to show; never under 1
+SETTLE_S = 0.3
+PACE = 1.0               # PC speed: 0.6 fast to 2 potato
+MOUSE_PACE = 1.0         # mouse travel scale
+WAIT_FLOOR = 0.6         # shorter waits miss late drawing
+LIMIT = 1.0              # show-wait scale, never under 1
 
 u32 = ctypes.WinDLL('user32', use_last_error=True)
 KEYUP, SCANCODE = 0x0002, 0x0008
@@ -281,7 +283,7 @@ VK = {'w': 0x57, 'a': 0x41, 's': 0x53, 'd': 0x44, 'q': 0x51, 'e': 0x45, 'f': 0x4
       '\\': 0xDC, 'oem5': 0xDC, 'o': 0x4F}
 ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
 KEY_SC = {'w': 0x11, 'a': 0x1E, 's': 0x1F, 'd': 0x20, 'q': 0x10, 'e': 0x12, 'f': 0x21, 'r': 0x13,
-          ' ': 0x39, 'shift': 0x2A, 'ctrl': 0x1D, 'enter': 0x1C, 'esc': 0x01, 'o': 0x18}   # scancodes
+          ' ': 0x39, 'shift': 0x2A, 'ctrl': 0x1D, 'enter': 0x1C, 'esc': 0x01, 'o': 0x18}
 
 
 class KI(ctypes.Structure):
@@ -303,7 +305,7 @@ class IN(ctypes.Structure):
 
 u32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
 u32.GetWindowThreadProcessId.restype = wintypes.DWORD
-u32.GetForegroundWindow.restype = wintypes.HWND     # match mousekey's handles, not a signed int
+u32.GetForegroundWindow.restype = wintypes.HWND     # match mousekey's handles
 u32.GetKeyboardLayout.argtypes = [wintypes.DWORD]
 u32.GetKeyboardLayout.restype = wintypes.HKL
 u32.MapVirtualKeyExW.argtypes = [wintypes.UINT, wintypes.UINT, wintypes.HKL]
@@ -326,8 +328,9 @@ def held(s):
 
 
 def set_pace(base):
-    global PACE, LIMIT
-    PACE, LIMIT = base, max(1.0, base)
+    global PACE, LIMIT, MOUSE_PACE
+    PACE, MOUSE_PACE = max(WAIT_FLOOR, base), base
+    LIMIT = max(1.0, PACE)
 
 
 def fresh_session():
@@ -358,7 +361,7 @@ def in_front():
         return False
 
 
-FRONT_EVERY = 2.0        # min s between focus grabs
+FRONT_EVERY = 2.0
 _took_front = 0.0
 
 
@@ -368,7 +371,7 @@ def wait_for_front(grace=3.0, take=True):
     end = time.monotonic() + grace
     while not in_front():
         if time.monotonic() > end:
-            # rate limited so we don't fight the user for focus
+            # don't fight the user for focus
             if take and time.monotonic() - _took_front > FRONT_EVERY:
                 _took_front = time.monotonic()
                 try:
@@ -381,7 +384,7 @@ def wait_for_front(grace=3.0, take=True):
         time.sleep(0.05)
 
 
-INPUT_LOCK = threading.RLock()     # so another thread's combo (the clip key) isn't cut into
+INPUT_LOCK = threading.RLock()     # keeps the clip key combo whole
 
 
 def _send(vk, flags, sc=None):
@@ -409,11 +412,11 @@ def up(key):
 
 
 STUCK_VK = (0x5B, 0x5C, 0x12, 0xA4, 0xA5, 0x79, 0x09, 0x25, 0x26, 0x27, 0x28, 0xA0, 0xA1, 0xA2, 0xA3)
-# keys we never send, lifted if left down. A stuck Win key opens Start over everything.
+# never sent, lifted if stuck (stuck Win opens Start)
 
 
 WIN_VKS = (0x5B, 0x5C)
-MASK_VK = 0xE8              # tap a dead key before Win goes up so Start stays shut (AutoHotkey's trick)
+MASK_VK = 0xE8              # dead key before Win up keeps Start shut
 
 
 def _key(vk, up):
@@ -486,7 +489,7 @@ def tap(key, hold=None, gap=None):
     paced(STEP_DELAY if gap is None else gap)
 
 
-MOVE_ABS = 0x0001 | 0x8000 | 0x4000        # move, absolute, whole virtual desktop
+MOVE_ABS = 0x0001 | 0x8000 | 0x4000        # absolute, whole desktop
 BTN_DOWN = {'left': 0x0002, 'right': 0x0008, 'middle': 0x0020}
 BTN_UP = {'left': 0x0004, 'right': 0x0010, 'middle': 0x0040}
 _said_refused = _said_locked = False
@@ -501,7 +504,7 @@ def _mouse(flags, data=0, dx=0, dy=0):
     if sent:
         _said_locked = False
         return True
-    if not u32.GetForegroundWindow():                       # locked, asleep or lid shut: nothing takes input
+    if not u32.GetForegroundWindow():                       # locked or asleep: no input
         if not _said_locked:
             _said_locked = True
             print('WARN mouse_refused reason="screen locked or asleep"')
@@ -526,7 +529,7 @@ def cursor():
     return p.x, p.y
 
 
-MOVE_DELAY_S = 0.15         # pause after a move before acting there
+MOVE_DELAY_S = 0.15
 
 
 def move_to(x, y, settle=MOVE_DELAY_S):
@@ -540,7 +543,7 @@ def move_to(x, y, settle=MOVE_DELAY_S):
 
 def button(name, down):
     """Press or release a mouse button; presses carry the position, releases don't (camera drags)."""
-    if u32.GetSystemMetrics(23):                   # left-handed mouse setting
+    if u32.GetSystemMetrics(23):                   # left-handed mouse
         name = {'left': 'right', 'right': 'left'}.get(name, name)
     if not down:
         return _mouse(BTN_UP[name])
@@ -548,7 +551,7 @@ def button(name, down):
     return _mouse(MOVE_ABS | BTN_DOWN[name], dx=dx, dy=dy)
 
 
-REAL = -4           # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: real pixels at any scale
+REAL = -4           # per-monitor v2: real pixels
 
 try:
     for _f in (u32.SetThreadDpiAwarenessContext, u32.GetThreadDpiAwarenessContext, u32.GetWindowDpiAwarenessContext):
@@ -557,7 +560,7 @@ try:
     u32.GetWindowDpiAwarenessContext.argtypes = [wintypes.HWND]
     u32.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
     u32.AreDpiAwarenessContextsEqual.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-except AttributeError:      # Windows 10 before 1607 has none of these
+except AttributeError:      # Windows 10 before 1607
     pass
 
 
@@ -650,7 +653,7 @@ def find_roblox_window():
     windows = mkey.get_all_windows()
     big = lambda w: min(w.dim_win) >= 200 or _minimised(w)
     candidates = [w for w in windows if w.pid in pids and w.status == 'visible' and big(w)]
-    if not candidates:     # Store Roblox: go by window text
+    if not candidates:     # Store Roblox: match window text
         candidates = [w for w in windows if w.status == 'visible' and (w.windowtext or '').strip() == 'Roblox' and big(w)]
     if not candidates:
         _why_no_window(pids, windows)
@@ -708,7 +711,7 @@ def focus_roblox(verify=True):
     window = find_roblox_window()
     if window is None:
         raise RuntimeError('No Roblox game window. Is it running and not minimised?')
-    _window = (time.monotonic(), window)            # refresh what in_front() checks
+    _window = (time.monotonic(), window)
     if foreground_hwnd() == window.hwnd:
         return window
     force_foreground(window.hwnd)
@@ -734,8 +737,8 @@ def take_foreground(tries=5, gap=0.35):
     return None
 
 
-FRONT_CLICK = 'merchantShopCloseButton'     # a dead spot, top right
-FRONT_CLICK_EVERY = 5.0                     # min s between tries
+FRONT_CLICK = 'merchantShopCloseButton'     # dead spot, top right
+FRONT_CLICK_EVERY = 5.0
 _clicked_front = 0.0
 
 
@@ -906,7 +909,7 @@ def window_box(box):
     return l + x0, t + y0, l + x1, t + y1
 
 
-WINDOW_TOP = 0.2556      # window's top edge on a 16:9 client
+WINDOW_TOP = 0.2556      # top edge on a 16:9 client
 
 
 def inventory_open(rgb=None):
@@ -975,7 +978,7 @@ def move_path(start, end, jitter=3.0, most=40):
     out = []
     for i in range(1, steps + 1):
         t = i / steps
-        e = 1 - (1 - t) ** 4 * (1 + 4 * t)          # top speed at a quarter of the time, long slow finish
+        e = 1 - (1 - t) ** 4 * (1 + 4 * t)          # fast start, long slow finish
         k = math.sin(math.pi * e) * bow
         out.append((sx + (tx - sx) * e + nx * k + random.uniform(-0.6, 0.6),
                     sy + (ty - sy) * e + ny * k + random.uniform(-0.6, 0.6)))
@@ -983,12 +986,12 @@ def move_path(start, end, jitter=3.0, most=40):
     return out
 
 
-GLIDE_S = 0.3              # pointer travel time
+GLIDE_S = 0.3
 
 
 def glide(x, y, settle=MOVE_DELAY_S, travel=GLIDE_S):
     path = move_path(cursor(), (x, y), most=12)
-    step = travel * PACE / len(path)                               # PC speed slider: slower mouse on a laggy PC
+    step = travel * min(PACE, MOUSE_PACE) / len(path)
     for i, (px, py) in enumerate(path):
         last = i == len(path) - 1
         move_to(int(round(px)), int(round(py)), settle=settle if last else step * random.uniform(0.8, 1.2))
@@ -998,7 +1001,7 @@ def click(x, y, park=True, settle=MOVE_DELAY_S, travel=GLIDE_S):
     """Focus Roblox, glide there, click. Nothing is sent if Roblox won't come forward."""
     if take_foreground() is None:
         return False
-    glide(x, y, settle, travel)                                   # the button needs to see the hover
+    glide(x, y, settle, travel)                                   # button needs the hover
     if not button('left', True):
         return False
     time.sleep(0.03 * LIMIT)
@@ -1043,31 +1046,31 @@ def close_inventory():
 
 
 # ================================================================ staying connected
-QUIET_S = 240.0          # no new log line for this long: frozen
+QUIET_S = 240.0          # no log line this long: frozen
 JOIN_S = 150.0
-JOIN_SLOW_S = 300.0      # after a failed try: some clients take minutes to join
-START_S = 60.0           # no Roblox at all this long after opening the server: try again
+JOIN_SLOW_S = 300.0      # some clients take minutes to join
+START_S = 60.0           # no Roblox this long: retry
 READY_S = 90.0
 JOIN_SETTLE_S = 8.0
 PLAY_POINT = (("play", "Play button on the title screen"),)
-# built-in button spots (gui_points.json); a calibrated spot wins
+# built-in spots; a calibrated one wins
 BUILT_IN = {'play': 'loadingPlayButton', 'collection': 'mainInterfaceCollection',
             'exit_collection': 'collectionLeftExitButton', 'inventory': 'mainInterfaceInventory',
             'items': 'inventoryItemsTab', 'search': 'inventorySearchContent', 'slot1': 'inventoryInvItem[1,1]',
             'slot2': 'inventoryInvItem[1,2]', 'use': 'inventoryUseButton', 'aura_storage': 'mainInterfaceAuraStorage'}
-PLAY_PRESSES = 2        # Play clicks before we assume the game started
-PLAY_SETTLE_S = 5.0     # wait after pressing Play
-PLAY_AFTER_S = 45.0     # press Play this long after opening the server
-CLOSED_SETTLE_S = 2.0   # after Roblox closes, before relaunching
-PLAY_BOX = (0.0, 0.72, 0.4, 1.0)     # Play sits bottom left
-PLAY_RGB = (0x7e, 0xff, 0x91)        # its green
-PLAY_TOL = 30                        # allowed red/blue drift
+PLAY_PRESSES = 2
+PLAY_SETTLE_S = 5.0
+PLAY_AFTER_S = 45.0     # after opening the server
+CLOSED_SETTLE_S = 2.0
+PLAY_BOX = (0.0, 0.72, 0.4, 1.0)     # bottom left
+PLAY_RGB = (0x7e, 0xff, 0x91)
+PLAY_TOL = 30                        # red/blue drift
 LOST = ('Lost connection with reason', 'Client has been disconnected with reason',
         'Disconnection Notification', 'ID_CONNECTION_LOST', 'leaveUGCGameInternal')
 JOINED = ('Connection accepted from', 'Replicator created for player')
 GAME_OUTPUT = '[FLog::Creator'
 FROZEN = 'frozen'
-REJOIN_GRACE_S = 30.0   # give the game's own rejoin this long first
+REJOIN_GRACE_S = 30.0   # let the game rejoin first
 def tidy_link(text):
     """Cut a pasted link's code where it stops ('...136155Roblox' has a word stuck on)."""
     text = re.sub(r'(privateServerLinkCode=\d+)[^\d&#\s]+', r'\1', (text or '').strip(), flags=re.I)
@@ -1111,12 +1114,12 @@ class Watch:
         self.log_dir = log_dir or LOG_DIR
         self.path, self.pos, self.tail = None, 0, ''
         self.state, self.why = None, ''
-        self.joined = False                   # this log has joined a game
-        self.aura = None                      # last aura the log reported
-        self.in_menu = False                  # on the title screen
-        self.menu_at = 0.0                    # when the log last said so
-        self.fresh = time.monotonic()              # when the log last grew
-        self.dropped = None                   # a drop since trouble() last asked, even if it came back
+        self.joined = False                   # joined a game
+        self.aura = None
+        self.in_menu = False                  # title screen
+        self.menu_at = 0.0
+        self.fresh = time.monotonic()
+        self.dropped = None                   # sticky until trouble() asks
         self._lock = threading.RLock()        # polled from two threads
 
     def poll(self, now=None):
@@ -1152,14 +1155,14 @@ class Watch:
                 for line in lines:
                     if RPC_MARKER in line:
                         aura = aura_from_line(line)
-                        if aura is not None:            # _None_ too: in game, nothing equipped
+                        if aura is not None:            # _None_ = nothing equipped
                             self.in_menu = False
                         elif 'In Main Menu' in line:
                             self.in_menu = True
                             self.menu_at = time_from_line(line) or now
                         if aura is not None and aura != self.aura:
                             self.aura = aura
-                    if GAME_OUTPUT in line:         # the game's own log lines, skip
+                    if GAME_OUTPUT in line:         # skip the game's own lines
                         continue
                     if any(k in line for k in LOST):
                         if self.state != 'lost':
@@ -1185,7 +1188,7 @@ class Watch:
         if self.poll() == 'lost':
             self.dropped = None
             return 'disconnected (%s)' % self.why
-        if self.dropped:                          # dropped and back between polls still counts
+        if self.dropped:                          # a blip still counts
             why, self.dropped = self.dropped, None
             return 'disconnected (%s) and came back by itself' % why
         if self.path and self.quiet_for() > quiet_s:
@@ -1193,7 +1196,7 @@ class Watch:
         return None
 
 
-GONE_S = 15.0            # window missing this long = closed
+GONE_S = 15.0
 _window_seen = 0.0
 
 
@@ -1209,7 +1212,7 @@ def roblox_running():
     return up
 
 
-HUNG_S = 60.0            # "Not Responding" this long = frozen
+HUNG_S = 60.0
 _hung_since = None
 
 
@@ -1266,7 +1269,7 @@ def find_play():
     return int(x), int(y)
 
 
-MENU_S = 90.0            # trust the title-screen flag this long; some clients never log the aura after Play
+MENU_S = 90.0            # some clients never log the aura after Play
 
 
 def in_game(watch):
@@ -1299,7 +1302,7 @@ def press_play(watch, stop=lambda: False, say=lambda m: None, timeout=90.0, play
             click(*at)
             presses += 1
             time.sleep(PLAY_SETTLE_S)
-            if find_play() is None:                     # it took
+            if find_play() is None:
                 return True
             continue
         else:
@@ -1408,8 +1411,8 @@ def browser_windows():
     return {w.hwnd: window_title(w.hwnd) for w in mkey.get_all_windows() if w.pid in pids and w.status == 'visible'}
 
 
-TAB_WAIT_S = 6.0         # time for the browser to show the page
-MORE_TABS = 10           # extra copies of the page to close (earlier launches)
+TAB_WAIT_S = 6.0
+MORE_TABS = 10           # earlier launches' copies to close
 
 
 def opened_tab(before, wait=TAB_WAIT_S):
@@ -1525,14 +1528,14 @@ def rejoin(link, say=lambda m: None, stop=lambda: False, log_dir=None, browser=F
             say('self_rejoined')
             return True
     if roblox_running():
-        # a second client next to a stuck one joins nothing
+        # a second client won't join beside a stuck one
         say('close_roblox reason="before reopen"')
         if not close_roblox():
             say('ERROR close_roblox_failed wait_s=15')
             return False
         time.sleep(CLOSED_SETTLE_S)
     watch = Watch(log_dir)
-    watch.poll()        # skip history; only lines after the launch count
+    watch.poll()        # skip history
     watch.state, watch.why, watch.aura, watch.in_menu = None, '', None, False
     if stop():
         return False
@@ -1555,7 +1558,7 @@ def _join(watch, stop, say, tab, join_s=JOIN_S):
         now = time.monotonic()
         play_due, pressed = calibrated_play(watch, play_due, say)
         presses += pressed
-        # Roblox logs leaveUGCGameInternal during the handover, before the join
+        # Roblox logs a leave before the join
         if watch.state == 'lost' and (joined_at is not None or 'leaveUGCGameInternal' not in watch.why):
             say('ERROR join_dropped reason="%s"' % watch.why)
             return False
@@ -1572,7 +1575,7 @@ def _join(watch, stop, say, tab, join_s=JOIN_S):
             if not started:
                 say('ERROR roblox_not_started wait_s=%d' % START_S)
                 return False
-        if find_play() is not None:                     # Play is showing: press it now
+        if find_play() is not None:
             if not press_play(watch, stop, say, play_due=play_due, presses=presses):
                 say('ERROR game_not_started after=play_seen')
                 return False
@@ -1603,17 +1606,17 @@ POINTS = (
     ('use', 'Use button'),
 )
 SC, BR = 'strange controller', 'biome randomizer'
-CLEAR_TAPS = 40          # clears the old search (aura names run to 31 chars)
+CLEAR_TAPS = 40          # aura names run to 31 chars
 
 
 NAME_COLOURS = {SC: 'grey', BR: 'grey', 'merchant teleporter': 'gold', 'portable crack': 'gold'}
-NAME_LOOKS = {'grey': ('grey', 'white'), 'gold': ('gold',)}     # One-time Biome Randomizer is gold: never a BR
-GOLD = (30, 60)          # hue in degrees (Teleporter and Crack read 44-46)
-NAME_INK = 0.02          # share of the read area a name covers
-NAME_W, NAME_H = 0.36, 0.2   # half the read area, as a share of the slot pitch
+NAME_LOOKS = {'grey': ('grey', 'white'), 'gold': ('gold',)}     # gold = One-time BR, never a BR
+GOLD = (30, 60)          # hue; Teleporter and Crack read 44-46
+NAME_INK = 0.02          # share of read area
+NAME_W, NAME_H = 0.36, 0.2   # half size, share of slot pitch
 
 
-INTERRUPT = None         # set during a turn: a merchant or pop stops it
+INTERRUPT = None         # a merchant or pop stops a turn
 
 
 def stopped():
@@ -1625,7 +1628,7 @@ def type_char(ch, hold=0.03):
     wait_for_front()
     r = u32.VkKeyScanExW(ch, _layout())
     vk, mods = r & 0xFF, (r >> 8) & 0xFF
-    if r == -1 or mods & ~1:                    # no plain key for it: send it as unicode
+    if r == -1 or mods & ~1:                    # no plain key: send unicode
         for flags in (0x0004, 0x0004 | KEYUP):  # KEYEVENTF_UNICODE
             inp = IN(type=1, ki=KI(wVk=0, wScan=ord(ch), dwFlags=flags, time=0, dwExtraInfo=0))
             if not u32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp)):
@@ -1633,7 +1636,7 @@ def type_char(ch, hold=0.03):
             paced(hold)
         return
     if mods & 1:
-        _send(0x10, 0, 0x2A)                    # Shift
+        _send(0x10, 0, 0x2A)
     try:
         _send(vk, 0)
         paced(hold)
@@ -1649,14 +1652,14 @@ def type_term(term, clear=True):
 
 
 def _type_keys(term, clear=True):
-    if clear:                                   # select all first: leftover text can be longer than the taps
+    if clear:                                   # leftover text can outlast the taps
         down('ctrl')
         try:
             tap('a', hold=0.01, gap=0.01)
         finally:
             up('ctrl')
         tap(Key.backspace, hold=0.01, gap=0.01)
-    for key in (Key.backspace, Key.delete) if clear else ():     # caret may be mid-text, clear both sides
+    for key in (Key.backspace, Key.delete) if clear else ():     # caret may be mid-text
         for _ in range(CLEAR_TAPS):
             tap(key, hold=0.01, gap=0.01)
     for ch in term:
@@ -1673,12 +1676,12 @@ for _f, _a, _r in ((u32.GetClipboardData, [wintypes.UINT], ctypes.c_void_p),
                    (k32.GlobalUnlock, [ctypes.c_void_p], wintypes.BOOL),
                    (k32.GlobalSize, [ctypes.c_void_p], ctypes.c_size_t)):
     _f.argtypes, _f.restype = _a, _r
-CLIP_HANDLES = {2, 3, 9, 14, 0x80, 0x82, 0x83, 0x8E} | set(range(0x300, 0x400))   # GDI handles, not memory: skipped
-CLIP_PRIVATE = u32.RegisterClipboardFormatW('ExcludeClipboardContentFromMonitorProcessing')  # kept out of Win+V and VM sync
+CLIP_HANDLES = {2, 3, 9, 14, 0x80, 0x82, 0x83, 0x8E} | set(range(0x300, 0x400))   # GDI handles: skipped
+CLIP_PRIVATE = u32.RegisterClipboardFormatW('ExcludeClipboardContentFromMonitorProcessing')  # kept out of Win+V
 
 
 def _clip_open():
-    for _ in range(10):                         # another program may hold it for a moment
+    for _ in range(10):                         # may be held briefly
         if u32.OpenClipboard(None):
             return True
         time.sleep(0.01)
@@ -1747,7 +1750,7 @@ def paste_term(term, clear=True):
             tap('v', hold=0.01, gap=0.01)
         finally:
             up('ctrl')
-        time.sleep(PASTE_READ_S)                # Roblox reads the clipboard when it handles the keys
+        time.sleep(PASTE_READ_S)                # Roblox reads it with the keys
     finally:
         _clip_set(saved)
 
@@ -1761,7 +1764,7 @@ def trim_memory():
     ps.EmptyWorkingSet.argtypes = [wintypes.HANDLE]
     k32.GetCurrentProcess.restype = wintypes.HANDLE
     return bool(ps.EmptyWorkingSet(k32.GetCurrentProcess()))
-PASTE_CLEAR = 10          # taps each way, about 0.25 s
+PASTE_CLEAR = 10          # about 0.25 s
 
 
 DAILY_POINTS = (('daily_claim', 'Daily rewards: Claim button'), ('daily_close', 'Daily rewards: Close button'))
@@ -1785,10 +1788,10 @@ MERCHANT_POINTS = (
 )
 BUILT_IN.update({name: name for name, _ in FISH_POINTS + MERCHANT_POINTS})
 BUILT_IN.update({'daily_claim': 'dailyRewardsClaimButton', 'daily_close': 'dailyRewardsCloseButton'})
-DAILY_WAIT_S = 2.0       # for their window to show after rejoining
+DAILY_WAIT_S = 2.0
 
 
-DAILY_SHOW_S = 10.0      # how long its window may take to pop up after joining
+DAILY_SHOW_S = 10.0
 
 
 def daily_state(rgb=None):
@@ -1799,9 +1802,9 @@ def daily_state(rgb=None):
     if rgb is None or rgb.size == 0:
         return None
     r, g, b = (rgb[..., i].astype(int) for i in range(3))
-    if (rgb.max(axis=2) < 45).mean() < 0.5:     # behind Claim, the dark cover leaves ~7% of the world
+    if (rgb.max(axis=2) < 45).mean() < 0.5:     # Claim's dark cover leaves ~7% visible
         return None
-    greenish = (g - r > 40) & (g - b > 30) & (b >= r - 5)      # grass and leaves have less blue than red
+    greenish = (g - r > 40) & (g - b > 30) & (b >= r - 5)      # grass has less blue than red
     if (greenish & (g > 200)).mean() > 0.03:
         return 'claim'
     if (greenish & (g > 90) & (g < 160)).mean() > 0.03:
@@ -1845,16 +1848,16 @@ def item_pass(say=print, terms=(BR, SC)):
         for term in terms:
             if stopped():
                 break
-            slot = search_item(term, say, stopped, paced)        # reopens the Inventory if Use shut it
+            slot = search_item(term, say, stopped, paced)        # reopens Inventory if Use shut it
             if slot is not None and not stopped() and press_use(slot):
                 say('item_used term="%s" slot=%d' % (term, slot + 1))
                 used.append(term)
             elif not stopped():
                 say('WARN item_not_used term="%s"' % term)
     if INTERRUPT and INTERRUPT():
-        return used                             # left open for the merchant or pop
+        return used                             # left open for merchant or pop
     if not stopped() and (window_seen() or not sees_windows()):
-        press_point('inventory', settle=0.6)     # close it again
+        press_point('inventory', settle=0.6)
     close_inventory()
     return used
 
@@ -1889,7 +1892,7 @@ def _rects(hwnd):
     return (c.right - c.left, c.bottom - c.top), (w.right - w.left, w.bottom - w.top)
 
 
-FIT_SIZES = ((1920, 1080), (1920, 1009), (1366, 768), (1366, 697))   # odd sizes get the first that fits
+FIT_SIZES = ((1920, 1080), (1920, 1009), (1366, 768), (1366, 697))   # odd sizes: first that fits
 
 
 def fit_window(say=print):
@@ -1908,12 +1911,12 @@ def _fit(hwnd, say):
         return False                                    # minimised
     s = _client(hwnd)[1]
     stretched = '' if abs(s - 1) < 0.01 else ' (Roblox is not DPI aware: Windows stretches it %d%%)' % round(s * 100)
-    if not u32.GetWindowLongW(wintypes.HWND(hwnd), -16) & 0x00C00000:       # no title bar: fullscreen
+    if not u32.GetWindowLongW(wintypes.HWND(hwnd), -16) & 0x00C00000:       # no title bar = fullscreen
         say('Roblox is fullscreen (or borderless) at %dx%d, a size the buttons are not made for: press F11 in Roblox '
             'for a normal window and MMacro sizes it to 1080p%s' % (cw, ch, stretched))
         return False
     if u32.IsZoomed(wintypes.HWND(hwnd)):
-        u32.ShowWindowAsync(wintypes.HWND(hwnd), 9)     # SW_RESTORE: a maximised window cannot be sized
+        u32.ShowWindowAsync(wintypes.HWND(hwnd), 9)     # SW_RESTORE: maximised can't be sized
         time.sleep(0.6)
     (cw, ch), (ww, wh) = _rects(hwnd)
     info = _MONITORINFO(cbSize=ctypes.sizeof(_MONITORINFO))
@@ -1921,7 +1924,7 @@ def _fit(hwnd, say):
     work = info.rcWork
     room_w, room_h = work.right - work.left, work.bottom - work.top
     for tw, th in FIT_SIZES:
-        ow, oh = tw + ww - cw, th + wh - ch             # plus frame and title bar
+        ow, oh = tw + ww - cw, th + wh - ch
         if ow > room_w or oh > room_h:
             continue
         u32.SetWindowPos(wintypes.HWND(hwnd), None, work.left + (room_w - ow) // 2, work.top + (room_h - oh) // 2,
@@ -2025,8 +2028,8 @@ def collection_open():
     return int((line.mean(axis=1) >= 0.8).sum()) >= 3
 
 
-after_align = None       # run once after the next camera squaring (daily rewards after joining)
-align_fails = 0          # failed squarings in a row
+after_align = None       # once after next camera squaring (daily rewards)
+align_fails = 0
 
 
 def align_camera(stop=lambda: False):
@@ -2035,14 +2038,14 @@ def align_camera(stop=lambda: False):
     if stop() or take_foreground() is None:
         return False
     for go in range(1, 4):
-        # slow, a fast glide sometimes only hovers it
+        # slow: a fast glide may only hover
         if press_point('collection', settle=1.0, travel=0.6) and collection_open() is not False:
             break
         if stop():
             return False
         print('WARN collection_open_failed attempt=%d/3' % go)
         x, y = cursor()
-        glide(x + 60, y + 120)                  # off it so the next try hovers fresh
+        glide(x + 60, y + 120)                  # off it to hover fresh
     else:
         align_fails += 1
         return False
@@ -2050,7 +2053,7 @@ def align_camera(stop=lambda: False):
     for go in range(3):
         if stop() or not collection_open():
             break
-        # below 1440p chat covers Exit; its top-bar button hides it (the last go shows it again)
+        # below 1440p chat covers Exit; hide it (last go shows it again)
         print('WARN collection_still_open attempt=%d/3 chat=%s' % (go + 1, 'true' if go else 'false'))
         if go:
             press_chat()
@@ -2058,7 +2061,7 @@ def align_camera(stop=lambda: False):
     else:
         if collection_open():
             print('ERROR collection_close_failed tries=3')
-            align_fails += 1                    # counts toward a rejoin, or it retries every few seconds for ever
+            align_fails += 1                    # else it retries for ever
             return False
     align_fails = 0
     if after_align and not stop():
@@ -2067,7 +2070,7 @@ def align_camera(stop=lambda: False):
     return not stop()
 
 
-TILT_STEPS, TILT_STEP = 20, 10   # 200 px down in small relative moves; the camera stops at straight down
+TILT_STEPS, TILT_STEP = 20, 10   # camera stops at straight down
 
 
 def tilt_up(stop=stopped):
@@ -2081,7 +2084,7 @@ def tilt_up(stop=stopped):
     try:
         paced(0.2)
         for _ in range(TILT_STEPS):
-            _mouse(0x0001, dy=TILT_STEP)                 # relative move, like AHK's MouseMove 0, 10, , R
+            _mouse(0x0001, dy=TILT_STEP)
             time.sleep(0.03)
         paced(0.2)
     finally:
@@ -2090,7 +2093,7 @@ def tilt_up(stop=stopped):
     return not stop()
 
 
-CHAT_BUTTON = (138, 34)  # top bar's chat button from the client's top left, not scaled by window size
+CHAT_BUTTON = (138, 34)  # from client top left, not scaled
 
 
 def press_chat():
@@ -2111,7 +2114,7 @@ def inventory_shown():
 def reopened(halt=stopped):
     """Bring the Inventory back after a cutscene or window shut it. Its search and pick survive."""
     end = time.monotonic() + BACK_S * LIMIT
-    while not inventory_shown() and time.monotonic() < end:     # a cutscene gives it back by itself
+    while not inventory_shown() and time.monotonic() < end:     # cutscenes give it back
         if halt():
             return False
         paced(0.3)
@@ -2151,14 +2154,14 @@ def use_one():
     return until(amount_one, 0.1, 2.0, paced) and inventory_shown()
 
 
-USE_WAIT_S = 5.0         # for the slot count to drop
-USE_TRIES = 4            # Use presses per item, counting ones a cutscene or a shut Inventory ate
-BACK_S = 2.0             # wait for a cutscene to give the Inventory back before clicking it open
-LOOK_STEADY_S = 1.5      # how long a slot must stay the same before Use, so a late frame can't fake a use
-DOUBLE_USE = ('strange controller', 'biome randomizer', 'biome selector', 'merchant teleporter')     # Use clicked twice so it lands
-_searched = None         # the last term search_item found
+USE_WAIT_S = 5.0
+USE_TRIES = 4            # counts presses a cutscene ate
+BACK_S = 2.0
+LOOK_STEADY_S = 1.5      # so a late frame can't fake a use
+DOUBLE_USE = ('strange controller', 'biome randomizer', 'biome selector', 'merchant teleporter')     # Use twice so it lands
+_searched = None
 SEARCH_TRIES = 3
-RESULTS_S = 2.0          # for a slow grid to show the results
+RESULTS_S = 2.0
 
 
 def slot_look(slot):
@@ -2209,7 +2212,7 @@ def looks_used(look, before, halt):
     """The Inventory went away after Use: open it again and see if the slot changed. None if it can't be seen."""
     if not reopened(halt):
         return None
-    paced(1.0)                                  # a reply still on its way
+    paced(1.0)                                  # reply still coming
     a = look()
     paced(0.3)
     b = look()
@@ -2237,7 +2240,7 @@ def use_lit_after(want, wait_s=2.0):
 
 def picked(click_slot, say, settle=0.25):
     """Pick a slot so Use is live, never leaving an older pick for Use to spend. False if it won't take."""
-    old = use_lit()                             # an old pick survived (the Items tab click was lost): Use would spend it
+    old = use_lit()                             # old pick (lost Items click): Use would spend it
     for _ in range(2 if old else 0):
         press_point('items', settle=0.3)
         if use_lit_after(False):
@@ -2288,7 +2291,7 @@ def use_picked(pick, look, say, settle=0.25, halt=stopped, ours=False):
         if ((go == 0 and not ours) or not lit) and not picked(pick, say, settle):     # later, a lit Use is ours
             if inventory_shown():
                 return False
-            continue                            # it went away mid-pick
+            continue
         if not use_one():
             continue
         before = steady(look)
@@ -2300,7 +2303,7 @@ def use_picked(pick, look, say, settle=0.25, halt=stopped, ours=False):
         if taken == 'gone':
             seen = looks_used(look, before, halt)
             if seen is None:
-                seen = looks_used(look, before, halt)       # a cutscene then a closing window
+                seen = looks_used(look, before, halt)       # cutscene, then closing window
             taken = {True: 'used', False: 'same', None: 'gone'}[seen]
             if taken == 'same':
                 say('WARN use_retry reason="Inventory shut before Use took" attempt=%d/%d' % (go + 1, USE_TRIES))
@@ -2340,7 +2343,7 @@ def search_item(term, say, halt, wait, tries=SEARCH_TRIES):
             slot, colours = find_item(term)
             if slot is not None:
                 wait(0.3)
-                if find_item(term)[0] == slot:  # the grid can still be redrawing
+                if find_item(term)[0] == slot:  # grid may still redraw
                     _searched = term
                     return slot
             if time.monotonic() >= end or colours == ['no Inventory']:
@@ -2364,11 +2367,11 @@ def until(check, first, most, wait):
     return True
 
 
-OPEN_TRIES = 4           # clicks before giving up on a window (a cutscene eats clicks for up to 6 s)
-OPEN_WAIT = 1.5          # extra wait for a slow window
+OPEN_TRIES = 4           # cutscenes eat clicks up to 6 s
+OPEN_WAIT = 1.5
 
 
-_sees_windows = None     # sizes the Inventory has been recognised at; elsewhere not seeing it means nothing
+_sees_windows = None     # Inventory misses count only at these sizes
 
 
 def _size_key():
@@ -2394,13 +2397,13 @@ def window_seen():
     if key and not sees_windows():
         _sees_windows.add(key)
         try:
-            save_settings({'sees_windows': sorted(_sees_windows)})     # keep for next time
+            save_settings({'sees_windows': sorted(_sees_windows)})
         except Exception:
             pass
     return True
 
 
-_side_open = None        # side window we opened last
+_side_open = None
 
 
 def open_by_click(name, halted=lambda: False):
@@ -2408,7 +2411,7 @@ def open_by_click(name, halted=lambda: False):
     global _side_open
     if _side_open == name and inventory_open():
         return True
-    close_inventory()                                   # close anything else that's up
+    close_inventory()
     for _ in range(OPEN_TRIES):
         if halted() or not press_point(name, settle=0.4):
             return False
@@ -2482,11 +2485,11 @@ def find_item(term):
     left, top, _, _ = _window_rect()
     rgb = _grab_window()
     if sees_windows() and not inventory_open(rgb):
-        return None, ['no Inventory']           # a cutscene hides it; the world behind can read as a name
+        return None, ['no Inventory']           # a cutscene's backdrop can read as a name
     pitch = math.hypot(b[0] - a[0], b[1] - a[1])
     spots = [(x - left, y - top) for x, y in (a, b, (2 * b[0] - a[0], 2 * b[1] - a[1]))]
     want = NAME_COLOURS.get(term)
-    if want is None:                            # colour unknown: only a lone result, found by its white 'xN' count
+    if want is None:                            # colour unknown: lone result by its 'xN'
         colours = [name_colour(s, rgb, pitch) for s in spots]
         filled = [has_count(s, rgb, pitch) for s in spots]
         return (0 if filled == [True, False, False] else None), colours
@@ -2494,10 +2497,10 @@ def find_item(term):
     names = [name_colour(s, rgb, pitch) for s in spots[:2]]
     colours = ['%s %s' % ('box' if x else 'no box', n) for x, n in zip(boxes, names + [''])]
     if not boxes[0] or boxes[2]:
-        return None, colours                    # nothing listed, or the search didn't narrow it down
+        return None, colours                    # none, or search too broad
     found = [i for i in (0, 1) if boxes[i] and names[i] in NAME_LOOKS[want]]
     if not found and not boxes[1] and names[0] == 'empty':
-        found = [0]                             # failsafe: one result whose name didn't read; a wrong colour never passes
+        found = [0]                             # lone unread name; wrong colour never passes
     return (found[0] if found else None), colours
 
 
@@ -2588,7 +2591,7 @@ def demo():
 
     def _slow_came(verify=True):
         grabs.append(1)
-        front['is'] = False            # stays behind; the next key mustn't retry right away
+        front['is'] = False            # next key mustn't retry at once
 
     kept2, real2 = me.in_front, me.focus_roblox
     me.in_front, me.focus_roblox, me._took_front = lambda: front['is'], _slow_came, 0.0

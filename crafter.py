@@ -12,33 +12,33 @@ import merchant
 import potions
 import selector
 
-OPEN_S = 3.0             # for the screen to show after E
-STEP_S = 2.0             # for a click to show what it did
-SAY_S = 3.0              # for the message under the window
-COUNTDOWN_S = 8.0        # the Add Everything warning counts down 5 s first
+OPEN_S = 3.0             # screen to show after E
+STEP_S = 2.0             # click result to show
+SAY_S = 3.0              # message under the window
+COUNTDOWN_S = 8.0        # warning counts down 5 s first
 TRIES = 3
-CLICK_TRAVEL_S = 0.1     # pointer travel to a button
-HOVER_S = 0.08           # on the button before pressing, so Roblox sees the hover
-TWICE_GAP_S = 0.06       # between the two presses of a double click
-AUTO_TINT = 22           # Auto's colour shows through at about a third: green and teal-blue lift green over red by ~45
-TOAST_S = 1.5            # for the crafted notification after the message
-last_shot = None         # PNG of the notification of the last craft pressed here
-last_words = ''          # words of a blue notification that isn't a crafted one
-CRAFTED = re.compile(r'[ct][rf]?[aof]{1,2}ft')   # "crafted" as its font reads: crofted, trafted, cfaft
-BADGE = (111, 181, 255)  # blue of the "Potion Crafted" notification's words
+CLICK_TRAVEL_S = 0.1
+HOVER_S = 0.08           # so Roblox sees the hover
+TWICE_GAP_S = 0.06
+AUTO_TINT = 22           # Auto's tint lifts green over red by ~45
+TOAST_S = 1.5
+last_shot = None         # PNG of the last crafted notification
+last_words = ''          # blue notification that isn't a crafted one
+CRAFTED = re.compile(r'[ct][rf]?[aof]{1,2}ft')   # OCR reads: crofted, trafted, cfaft
+BADGE = (111, 181, 255)  # notification text blue
 BADGE_TOL = 14
-BADGE_INK = 0.0005       # share of the column that blue before it's read
-OCR_EVERY_S = 0.5        # crafted_seen reads at most this often; in between the last answer stands
+BADGE_INK = 0.0005       # share of that blue before reading
+OCR_EVERY_S = 0.5        # rate limit; else the last answer stands
 CRAFTABLE = ('Heavenly Potion', 'Godlike Potion', 'Potion of Bound', 'Warp Potion', 'Godly Potion (Zeus)',
              'Godly Potion (Poseidon)', 'Godly Potion (Hades)', 'Fortune Potion I', 'Fortune Potion II',
              'Fortune Potion III', 'Haste Potion I', 'Haste Potion II', 'Haste Potion III', 'Jewelry Potion',
              'Zombie Potion', 'Diver Potion', 'Rage Potion', 'Forbidden Potion I', 'Forbidden Potion II',
              'Forbidden Potion III', 'Void Heart')
 GODLY = {'Godly Potion (Zeus)': (251, 249, 6), 'Godly Potion (Poseidon)': (2, 239, 251),
-         'Godly Potion (Hades)': (187, 12, 15)}     # same name in the list: told apart by colour
+         'Godly Potion (Hades)': (187, 12, 15)}     # same name: told apart by colour
 COLOUR_TOL = 70
 
-_seen = (0.0, False)             # (when, answer) of the last crafted_seen read
+_seen = (0.0, False)
 
 
 def _fit(w, h, ratio):
@@ -72,7 +72,7 @@ def layout():
     bh = 0.125 * ch
     by = cy + 0.95 * ch - bh / 2
     o['open'] = (cx + 0.345 * cw, by)
-    o['auto'] = (cx + 0.69 * cw, by - bh / 2, cx + 0.97 * cw, by + bh / 2)      # right of Open Recipe
+    o['auto'] = (cx + 0.69 * cw, by - bh / 2, cx + 0.97 * cw, by + bh / 2)
     o['bar'] = (cx, by - 0.75 * bh, cx + cw, by + 0.75 * bh)
     # Add Ingredients window, middle
     iw, ih = _fit(0.3 * W, 0.3 * H, 1.5)
@@ -85,12 +85,12 @@ def layout():
     vw, vh = 0.99 * 0.99 * iw, 0.95 * 0.8 * ih
     vy = iy + 0.09 * ih + 0.025 * 0.8 * ih
     o['rows'] = (mx - vw / 2, vy, mx + vw / 2, vy + vh)
-    rw = 0.98 * 0.99 * vw                                   # a row's dark box
-    o['row'] = (mx - rw / 2, rw, 0.2 * vh)                  # its left, width, and the row pitch
+    rw = 0.98 * 0.99 * vw
+    o['row'] = (mx - rw / 2, rw, 0.2 * vh)                  # left, width, row pitch
     bw, bb = 0.99 * iw, 0.085 * ih
     y = iy + 0.99 * ih - bb / 2
     o['everything'], o['craft'] = (mx - 0.25 * bw, y), (mx + 0.25 * bw, y)
-    pt, ph, pw = iy + 0.09 * ih, 0.9 * ih, 0.99 * iw        # the warning's page
+    pt, ph, pw = iy + 0.09 * ih, 0.9 * ih, 0.99 * iw
     y, qw, qh = pt + 0.8375 * ph, 0.9 * pw, 0.125 * ph
     o['confirm'] = (mx + 0.2675 * qw, y)
     o['confirm_box'] = (mx + 0.0425 * qw, y - qh / 2, mx + 0.4925 * qw, y + qh / 2)
@@ -113,7 +113,7 @@ def _read(name):
     if img is None or img.size == 0:
         return []
     l, t, r, b = game.client_box((0.0, 0.0, 1.0, 1.0))
-    k = min(2.0, max(1.0, 1440.0 / max(1, b - t)))         # small windows: blow the words up first
+    k = min(2.0, max(1.0, 1440.0 / max(1, b - t)))         # small windows: upscale first
     if k > 1:
         img = np.asarray(Image.fromarray(img).resize((int(img.shape[1] * k), int(img.shape[0] * k)), Image.LANCZOS))
     return [(text, box[0] + x / k, box[1] + y / k) for text, x, y in _ocr(img)]
@@ -138,7 +138,7 @@ def named(lines, name):
 
 def _until(check, seconds, halt):
     """check() until it gives something, about every 0.3 s for `seconds`. None if it never does or on halt."""
-    for _ in range(max(1, round(seconds * game.LIMIT / (0.3 * max(game.PACE, 0.1))))):    # steps are paced: same total
+    for _ in range(max(1, round(seconds * game.LIMIT / (0.3 * max(game.PACE, 0.1))))):    # paced steps, same total
         t0 = time.monotonic()
         v = check()
         if v:
@@ -152,7 +152,7 @@ def _until(check, seconds, halt):
 def _click(at, twice=False):
     x, y = int(at[0]), int(at[1])
     ok = game.click(x, y, park=False, settle=HOVER_S, travel=CLICK_TRAVEL_S)
-    if ok and twice:                                        # a lone click on a box often isn't taken
+    if ok and twice:                                        # a lone click is often missed
         time.sleep(TWICE_GAP_S)
         ok = game.click(x, y, park=False, settle=0, travel=0)
     time.sleep(0.05)
@@ -249,15 +249,15 @@ def _term(name):
 def find_recipe(name, halt, say=print):
     """Search `name`, click it in the list, and wait for it to show on the left. True once picked."""
     godly, shown = name in GODLY, base(name)
-    top = boxes(2)                                          # an exact search leaves it first: read the top rows only
+    top = boxes(2)                                          # exact search: top rows only
     top = (top[0][0], top[0][1], top[1][2], top[1][3])
     find = (lambda: _godly_row(_read('list'), name)) if godly else (lambda: named(_read(top), shown))
     picked = (lambda: _godly_left(name)) if godly else (lambda: named(_read('left'), shown))
     for go in range(TRIES):
         if halt() or not _click(layout()['search'], twice=True):
             return False
-        game.type_term(_term(shown)[:-1] if godly else _term(shown))     # the brothers may carry the god's name
-        game.tap(game.Key.enter)                            # the list filters once the box lets go
+        game.type_term(_term(shown)[:-1] if godly else _term(shown))     # brothers may carry the god's name
+        game.tap(game.Key.enter)
         game.paced(0.4)
         row = _until(find, STEP_S, halt)
         if row is None:
@@ -276,7 +276,7 @@ def _fill(box):
     if img is None or img.size == 0:
         return None
     a = img.reshape(-1, 3).astype(int)
-    a = a[a.min(axis=1) < 215]                                # white words: every channel high
+    a = a[a.min(axis=1) < 215]
     return np.median(a, axis=0) if len(a) > 20 else None
 
 
@@ -308,22 +308,22 @@ def turn_auto_on(halt):
     """Press Auto until blue (off -> green -> blue); never pressed when already blue."""
     a = layout()['auto']
     at = ((a[0] + a[2]) / 2, (a[1] + a[3]) / 2)
-    game.paced(0.5)     # ponytail: guess - just after a pick Auto may still show the last recipe's colour
+    game.paced(0.5)     # ponytail: guess - Auto may briefly show the last recipe's colour
     for _ in range(TRIES):
         if auto_on():
             return True
-        if not auto_add_on():                               # off: the first press is auto add
+        if not auto_add_on():                               # off: first press is auto add
             if halt() or not _click(at):
                 return False
             got = _until(lambda: auto_on() or auto_add_on() or (warning_up() and 'warn'), STEP_S, halt)
-            if got == 'warn':                               # Roblox's "add everything with Auto?" prompt
+            if got == 'warn':                               # "add everything with Auto?" prompt
                 _warned(halt)
                 got = _until(lambda: auto_on() or auto_add_on(), STEP_S, halt)
             if not got:
                 continue
             if auto_on():
                 return True
-        if halt() or not _click(at):                        # green: once more for auto craft
+        if halt() or not _click(at):                        # green: again for auto craft
             return False
         if _until(auto_on, STEP_S, halt):
             return True
@@ -350,7 +350,7 @@ def _warned(halt):
     """Answer the warning's countdown: wait for its right button to stop counting, then press it."""
     def counted():
         words = _text('confirm_box')
-        return 'add' in words                               # it reads "( 5 )" ... "( 1 )" first, then "Add ..."
+        return 'add' in words                               # countdown "( 5 )" ... "( 1 )" comes first
 
     return bool(_until(counted, COUNTDOWN_S, halt)) and _click(layout()['confirm'])
 
@@ -369,7 +369,7 @@ def craft(name, halt):
         return ('crafted' if any('crafted' in t for t in said) else 'not enough') if said else None
     got = _until(answer, SAY_S, halt)
     if got == 'crafted':
-        _until(lambda: crafted_seen(name), TOAST_S, halt)   # the notification comes a moment after the message
+        _until(lambda: crafted_seen(name), TOAST_S, halt)
         last_shot = toast_png()
     return got
 
@@ -388,7 +388,7 @@ def auto_start(halt, item='Heavenly Potion', say=print):
     """Pick `item`, turn its Auto on, Add Everything and Craft: 'crafted', 'added' (not done yet), or False."""
     took, t0 = [], time.monotonic()
 
-    def step(name):                                         # seconds per step, for the log
+    def step(name):
         nonlocal t0
         took.append('%s_s=%.1f' % (name, time.monotonic() - t0))
         t0 = time.monotonic()
@@ -471,7 +471,7 @@ def crafted_name():
     if not CRAFTED.search(text):
         last_words = text
         return None
-    names = sorted({base(p) for p in CRAFTABLE} | set(potions.POTIONS), key=len, reverse=True)   # longest first
+    names = sorted({base(p) for p in CRAFTABLE} | set(potions.POTIONS), key=len, reverse=True)
     return next((p for p in names if selector.squash(p) in text), '')
 
 
@@ -491,11 +491,11 @@ def crafted_seen(name='Heavenly Potion'):
         return _seen[1]
     top, bottom = max(0, rows[0] - 20), min(img.shape[0], rows[-1] + 20)
     crop = img[top:bottom]
-    if crop.shape[0] < 400:                                 # its lower line is small: blow it up
+    if crop.shape[0] < 400:                                 # small lower line: upscale
         crop = np.asarray(Image.fromarray(crop).resize((crop.shape[1] * 2, crop.shape[0] * 2), Image.LANCZOS))
     text = selector.squash(' '.join(t for t, _, _ in _ocr(crop)))
     want = selector.squash(base(name))
-    # ponytail: if the lower line can't be read, a "crafted" naming no other potion counts as ours
+    # ponytail: lower line unreadable: a "crafted" naming no other potion is ours
     others = [p for p in potions.POTIONS if selector.squash(p) != want and selector.squash(p) in text]
     hit = bool(CRAFTED.search(text)) and (want in text or not others)
     _seen = (now, hit)
