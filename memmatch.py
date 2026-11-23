@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import time
+from time import strftime
 
 import cv2
 import numpy as np
@@ -20,6 +21,9 @@ STILL_S = 1.0            # backs still = curtain gone
 FLIP_S = 3.0             # else the click was lost
 SETTLE_S = 2.5
 SHOWN_S = 0.6            # a turn takes 0.6 s
+FADE_S = 0.65            # ... and the white flash over a turned card fades with it
+READ_S = 1.0             # live: the flash can still be fading at 0.75 s, gone by ~0.8 s
+BLANK_S = 4.0            # a picture not loaded yet (new account): wait this long for it
 TURN_S = 8.0
 END_S = 10.0
 GAME_S = 300.0           # a good game takes ~90 s
@@ -27,9 +31,9 @@ TRIES = 3
 FLIPS = 5
 STEP = 0.15
 CARDS = 20
-CHANCES = 10             # past this many pairs the board may end
-OVER_S = 2.0             # ... all cards turn up if it did
+CHANCES = 10             # every pair turned costs one, matched or not
 last_shot = None         # end screen PNG, last game
+MISSES = os.path.join(game.APP_DIR, 'memory mismatches')     # wrong pairs' cards, newest 30
 SIZE = 64
 INK = 40
 BACK = 0.03              # changed share: still its back
@@ -228,6 +232,23 @@ def look_of(name):
     return _looks[name]
 
 
+def _name(look, tint):
+    """The one known reward whose picture and colour this card matches, or None."""
+    hits = [n for n in rewards() if look_of(n) is not None and _same_item(look_of(n), (look, tint))]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _keep(name, rgb):
+    """Save a picture to the mismatch folder, keeping only the newest 30."""
+    try:
+        os.makedirs(MISSES, exist_ok=True)
+        cv2.imwrite(os.path.join(MISSES, strftime('%Y%m%d_%H%M%S_') + name), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+        for old in sorted(os.listdir(MISSES))[:-30]:
+            os.remove(os.path.join(MISSES, old))
+    except (OSError, cv2.error):
+        pass
+
+
 def face_of(raw, face):
     """(look, tint) of a face up card just grabbed, or None if it's mid-turn, green or changed since `face`."""
     look = _small(raw)
@@ -236,6 +257,13 @@ def face_of(raw, face):
     if (look.min(axis=2) > 230).mean() > 0.5:                       # the white flash of a turn
         return None
     return look, _tint(raw)
+
+
+def _blank(look):
+    """Only the amount shows: the picture hasn't loaded yet (new account). Real pictures ink 2.5%+ of the card."""
+    top, cut = SIZE // 10, int(SIZE * LABEL)
+    pic = look[top:cut].astype(int)
+    return (np.abs(pic - np.median(pic.reshape(-1, 3), axis=0)).max(axis=2) > INK).mean() < 0.01
 
 
 def _green(look):
@@ -284,6 +312,9 @@ class Board:
         self.turns = 0           # each pair uses a chance
         self.tints = {}          # card -> middle colour
         self.amounts = {}
+        self.names = {}          # card -> known reward it matches
+        self.raws = {}
+        self.missed = False
 
     def look(self, i):
         return _small(game.grab(self.boxes[i]))
@@ -326,27 +357,39 @@ class Board:
                 if time.monotonic() > end or not self.wait():
                     break
             else:
+                opened = time.monotonic()
                 face = self.settle(i)
                 if face is not None and not self.down(face):
-                    self.read(i, face)
+                    final = self.read(i, face, opened)
+                    face = face if final is None else final
                 return face
             if self.halt():
                 return None
             self.say('WARN card_no_turn card=%d attempt=%d/%d' % (i + 1, go + 1, FLIPS))
         return None
 
-    def read(self, i, face):
-        """Colour and amount of a face up card, kept only if two looks 0.1 s apart agree (a fading flash doesn't)."""
-        items = []
-        for _ in range(2):
+    def read(self, i, face, opened=None):
+        """Colour, amount and known reward of a face up card once its white flash has faded: looks 0.1 s apart until
+        two agree, longer while its picture hasn't loaded. Its final look, or None."""
+        while opened is not None and time.monotonic() < opened + FADE_S:
+            if not self.wait(0.05):
+                return None
+        start, last = time.monotonic(), None
+        while True:
             raw = game.grab(self.boxes[i])
-            items.append(None if self.down(_small(raw)) else face_of(raw, face))
-            if items[-1] is None or len(items) == 2 or not self.wait(0.1):
+            now = _small(raw)
+            if self.down(now):
+                return None
+            item = face_of(raw, face)
+            blank = item is not None and _blank(item[0])
+            if item is not None and not blank and last is not None and _same_tint(last[1], item[1], TINT / 3):
                 break
-        if len(items) < 2 or items[1] is None or not _same_tint(items[0][1], items[1][1], TINT / 3):
-            return
-        self.tints[i] = items[1][1]
-        self.amounts[i] = amount(raw)
+            if time.monotonic() > start + (BLANK_S if blank else READ_S) or not self.wait(0.1):
+                return None
+            face, last = now, (None if blank else item)     # flash fading or picture loading: compare with this next
+        look, self.tints[i] = item
+        self.amounts[i], self.names[i], self.raws[i] = amount(raw), _name(look, self.tints[i]), raw
+        return look
 
     def settle(self, i):
         start = time.monotonic()
@@ -372,13 +415,23 @@ class Board:
         return None
 
     def same(self, fa, a, fb, b):
-        """Same reward: same item (picture and colour) and amount (as numbers if both read, else as pictures)."""
-        na, nb = self.amounts.get(a), self.amounts.get(b)
-        if _apart((fa, self.tints.get(a)), (fb, self.tints.get(b))):
+        """Same reward: the item first (picture and colour), then the amount (as numbers if both read, else as
+        pictures). Look-alike bottles differ only in colour, so a colour that wasn't read is taken from the pictures."""
+        ka, kb = self.names.get(a), self.names.get(b)
+        ta, tb = self.tints.get(a), self.tints.get(b)
+        if _blank(fa) or _blank(fb):
             return False
-        if na is not None and nb is not None:
-            return na == nb and _same_item((fa, self.tints.get(a)), (fb, self.tints.get(b)))
-        return _same(fa, fb) and _same_tint(self.tints.get(a), self.tints.get(b))
+        if ka and kb and ka != kb:                          # each matched a different known reward picture
+            return False
+        if _apart((fa, ta), (fb, tb)) or not _same_picture(fa, fb):
+            return False
+        if ta is None or tb is None:                        # pictures blur colour: same item within 9, others 17+
+            if not _same_tint(_tint(fa), _tint(fb), 1.5 * TINT):
+                return False
+        elif not _same_tint(ta, tb):
+            return False
+        na, nb = self.amounts.get(a), self.amounts.get(b)
+        return na == nb if na is not None and nb is not None else _same(fa, fb)
 
     def twin(self, face, skip):
         for k, f in self.faces.items():
@@ -405,8 +458,9 @@ class Board:
         known = [k for k in self.faces if k not in self.done | self.dead]
         pairs = [(i, j) for i in known for j in known
                  if i < j and self.alike(i, j) and not self.useless(self.faces[i], i)]
-        # biggest first: a wrong pair can end the game early
-        pair = max(pairs, key=lambda p: self.amounts.get(p[0]) or self.amounts.get(p[1]) or 0, default=None)
+        # a wrong pair can end the game early: sure pairs (one known reward) first, then the biggest
+        pair = max(pairs, key=lambda p: (self.names.get(p[0]) is not None and self.names.get(p[0]) == self.names.get(p[1]),
+                                         self.amounts.get(p[0]) or self.amounts.get(p[1]) or 0), default=None)
         fresh = [k for k in range(CARDS) if k not in self.faces and k not in self.done | self.dead]
         if pair:
             a, b = pair
@@ -453,7 +507,12 @@ class Board:
                 self.memo = {p: v for p, v in self.memo.items() if k not in p}
         if fa is not None and fb is not None and self.same(fa, a, fb, b):
             self.apart |= {(a, b), (b, a)}                  # alike to us, not to the game
-            self.say('WARN pair_mismatch a="%s" b="%s"' % (self.shown(a), self.shown(b)))
+            self.say('WARN pair_mismatch a="%s" b="%s" known="%s/%s"' % (self.shown(a), self.shown(b),
+                                                                        self.names.get(a), self.names.get(b)))
+            self.missed = True
+            for k in (a, b):
+                if k in self.raws:
+                    _keep('card%d.png' % (k + 1), self.raws[k])
         return True
 
     def play(self):
@@ -462,20 +521,10 @@ class Board:
             return None
         end = time.monotonic() + GAME_S * game.LIMIT
         for _ in range(4 * CARDS):
-            if (len(self.done) == CARDS or self.halt() or time.monotonic() > end or self.spent()
+            if (len(self.done) == CARDS or self.halt() or time.monotonic() > end or self.turns >= CHANCES
                     or not self.turn()):
                 break
         return len(self.done) // 2
-
-    def spent(self):
-        """Ended after its chances? Past CHANCES pairs, wait a moment for every card to show face up."""
-        if self.turns < CHANCES:
-            return False
-        stop = time.monotonic() + OVER_S * game.LIMIT
-        while not self.over():
-            if time.monotonic() > stop or not self.wait(0.2):
-                return False
-        return True
 
     def finish(self):
         """Picture the face-up board, then press Close once it shows. True if it closed."""
@@ -490,6 +539,8 @@ class Board:
                 game.paced(SHOWN_S)
                 ok, png = cv2.imencode('.png', cv2.cvtColor(game._grab_window(), cv2.COLOR_RGB2BGR))
                 last_shot, shot = (png.tobytes() if ok else None), True
+                if self.missed:
+                    _keep('board.png', game._grab_window())
             x, y = mid(self.close)
             game.click(x, y, park=False)
             game.paced(0.5)

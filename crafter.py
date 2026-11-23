@@ -22,6 +22,9 @@ HOVER_S = 0.08           # so Roblox sees the hover
 TWICE_GAP_S = 0.06
 AUTO_TINT = 22           # Auto's tint lifts green over red by ~45
 TOAST_S = 1.5
+WARNINGS = 4             # Add Everything's own, then one per item that asks
+LATE_WARN_S = 1.0        # a warning can show just after "completed"
+TICK_DIFF = 12           # the tick changes the box this much
 last_shot = None         # PNG of the last crafted notification
 last_words = ''          # blue notification that isn't a crafted one
 CRAFTED = re.compile(r'[ct][rf]?[aof]{1,2}ft')   # OCR reads: crofted, trafted, cfaft
@@ -95,7 +98,9 @@ def layout():
     o['confirm'] = (mx + 0.2675 * qw, y)
     o['confirm_box'] = (mx + 0.0425 * qw, y - qh / 2, mx + 0.4925 * qw, y + qh / 2)
     kh = 0.075 * ih
-    o['dont_show'] = (mx - 0.3625 * iw + kh / 2, iy + 0.7 * ih)
+    x, y = o['dont_show'] = (mx - 0.3625 * iw + kh / 2, iy + 0.7 * ih)
+    o['dont_show_box'] = (x - 0.3 * kh, y - 0.3 * kh, x + 0.3 * kh, y + 0.3 * kh)
+    o['lines'] = (cx, cy, cx + cw, by - 0.75 * bh)         # the Recipe panel's lines, above Open Recipe
     o['messages'] = (l + 0.275 * W, t + 0.7 * H, l + 0.725 * W, t + 0.87 * H)
     o['toasts'] = (l + 0.795 * W, t + 0.399 * H, l + 0.994 * W, t + 0.899 * H)
     return o
@@ -408,9 +413,16 @@ def auto_start(halt, item='Heavenly Potion', say=print):
         done('ERROR recipe_open_failed item="%s"' % item)
         return False
     step('open')
-    if not everything(halt):
+    if not everything(halt, say):
         say('WARN add_all_unconfirmed item="%s"' % item)
     step('add_all')
+    short = short_lines()
+    if short:                                               # Add Everything by hand fills them: pressed again
+        say('WARN recipe_short item="%s" lines="%s" retry=add_all' % (item, short))
+        everything(halt, say)
+        short = short_lines()
+        if short:
+            say('recipe_short item="%s" lines="%s"' % (item, short))
     got = craft(item, halt)
     step('craft')
     if got == 'crafted':
@@ -432,19 +444,66 @@ def auto_back(halt, item='Heavenly Potion', say=print):
     return False
 
 
-def everything(halt):
-    """Add Everything, answering its warning (once: Don't show again is ticked). True once it says it's done."""
-    o = layout()
-    if halt() or not _click(o['everything']):
+def _tick(halt):
+    """Tick Don't show again, checked by sight: a click the game missed leaves the box as it was."""
+    grab = lambda: game.grab([int(v) for v in layout()['dont_show_box']])
+    before = grab()
+
+    def changed():
+        now = grab()
+        return now is not None and now.shape == before.shape and \
+            np.abs(now.astype(int) - before.astype(int)).mean() > TICK_DIFF
+    for _ in range(2):
+        if halt() or not _click(layout()['dont_show']):
+            return False
+        if before is None or before.size == 0:
+            return True                                     # can't see it: trust the click
+        if _until(changed, 0.6, halt):
+            return True
+    return False
+
+
+def everything(halt, say=print):
+    """Add Everything, answering each warning it brings: its own with Don't show again ticked, so it never asks
+    again, and any "... will be consumed" one. True once it says it's done with no warning left up."""
+    if halt() or not _click(layout()['everything']):
         return False
     done = lambda: any('completed' in t.lower() for t in _messages())
-    got = _until(lambda: (warning_up() and 'warn') or done(), STEP_S, halt)
-    if got == 'warn':
-        _click(o['dont_show'])
-        if not _warned(halt):
+    for _ in range(WARNINGS):
+        got = _until(lambda: (warning_up() and 'warn') or (done() and 'done'), SAY_S, halt)
+        if got == 'done' and not _until(warning_up, LATE_WARN_S, halt):     # a warning can follow the message
+            return True
+        if not got:
             return False
-        got = _until(done, SAY_S, halt)
-    return bool(got)
+        if got == 'warn':
+            words = _text('window')
+            say('add_all_warning text="%s"' % words[:100])
+            if 'again' in words and not _tick(halt):
+                say('WARN dont_show_again_not_ticked')
+            if not _warned(halt):
+                return False
+    return False
+
+
+COUNT = re.compile(r'\(?\s*(\d+)\s*/\s*(\d+)\s*\)?')
+
+
+def recipe_lines(rows):
+    """(name, have, need) per Recipe panel line; OCR gives the name and its ( have / need ) as rows at one height."""
+    counts, names = [], []
+    for text, _, y in rows:
+        m = COUNT.search(text.replace(',', '').replace('.', ''))
+        (counts.append((int(m.group(1)), int(m.group(2)), y)) if m else names.append((text, y)))
+    out = []
+    for have, need, y in counts:
+        name = min(names, key=lambda n: abs(n[1] - y), default=None)
+        out.append((name[0] if name and abs(name[1] - y) < 15 else '?', have, need))
+    return out
+
+
+def short_lines():
+    """Recipe panel lines still short, as "Speed Potion 423/1000"; '' when all are full or none were read."""
+    return ', '.join('%s %d/%d' % l for l in recipe_lines(_read('lines')) if l[1] < l[2])
 
 
 def _blue_rows(img):

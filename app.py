@@ -101,7 +101,7 @@ SMALL_BUTTON = dict(bg=SUNK, fg=TEXT, activebackground=SUNK, activeforeground=AC
                     highlightthickness=1, highlightbackground=EDGE)
 
 TITLE = 'MMacro'
-VERSION = '1.2.0'
+VERSION = '1.2.1'
 RELEASE_PAGE = 'https://github.com/ManasAarohi1/MMacro/releases/latest'
 RELEASES = os.environ.get('MMACRO_UPDATE_URL') or 'https://api.github.com/repos/ManasAarohi1/MMacro/releases/latest'
 INVITE = 'https://discord.gg/oppression'
@@ -236,6 +236,8 @@ STORE_ROBLOX = ('Merchant detection reads Roblox\'s cache (rbx-storage.db), whic
                 'with Roblox from roblox.com, Bloxstrap or Fishstrap.\n\nOpen Roblox once, or leave Merchant detection '
                 'off.')
 
+
+F2_GRACE_S = 0.5                # F2 this soon after Start is the same key press, not a stop
 
 class _ToLog:
     """The windowed exe has no console, so print goes to logs.txt, tagged with the printing module."""
@@ -2135,6 +2137,11 @@ class App:
             self._last_hotkey[which] = now
             note('run', 'hotkey key=F%d' % (1 if which == 'start' else 2))
             if which == 'stop':
+                started = now - getattr(self, 'started_at', -1e9)
+                if ctypes.windll.user32.GetAsyncKeyState(0x70) & 0x8000 or started < F2_GRACE_S:
+                    note('run', 'WARN hotkey_f2_ignored f1_held_or_just_started=true since_start_s=%.2f' % started)
+                    return True                             # a key that sends F1 and F2 together
+                self.stop_why = 'F2 pressed'
                 game.ABORT = True
             self.updates.put({'action': which, 'key': True})
         except Exception:
@@ -2201,7 +2208,7 @@ class App:
             if failed:
                 post_event(url, 'Biome detection stopped', '`%s`' % failed, EMBED_BAD, 'Biome')
             else:
-                post_event(url, 'Macro stopped')
+                post_event(url, 'Macro stopped', getattr(self, 'stop_why', '') or '')
             if self.biome_stop is stop:
                 self.biome_stop = None
             self._set(biome=(failed, BAD) if failed else ('', DIM))
@@ -2495,6 +2502,7 @@ class App:
         if self.running or self.updating:
             return
         self.ran = True
+        self.started_at, self.stop_why = time.perf_counter(), ''
         self.server_link = game.tidy_link(self.server.get())
         self.server.set(self.server_link)
         self.reconnect_on = bool(self.auto_reconnect.get())
@@ -2644,9 +2652,12 @@ class App:
                     except Exception:
                         pass
                     note('run', 'WARN run_restart reason=stall')
+                    self.stop_why = ''
         finally:
             ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
             self.running = False
+            if not getattr(self, 'stop_why', ''):
+                self.stop_why = 'run ended by itself (see logs.txt)'
             if self.biome_stop is not None:
                 self.biome_stop.set()
             if self.clipper is not None:
@@ -2936,6 +2947,7 @@ class App:
                 note('run', 'ERROR run_stalled idle_s=%d action=restart' % round(STALL_S * game.LIMIT))
                 self.tell('Macro stuck', 'No progress for %d minutes, restarting the run' % mins, EMBED_BAD)
                 self.restart_run = True
+                self.stop_why = 'stuck, restarting'
                 game.ABORT = True
             time.sleep(WATCH_EVERY)
 
@@ -3732,8 +3744,9 @@ class App:
         except Exception as e:
             note('menus', 'ERROR close_menus_failed type=%s msg="%s"' % (type(e).__name__, e))
 
-    def stop(self):
-        note('run', 'stop_pressed')
+    def stop(self, why='Stop pressed'):
+        note('run', 'stop_pressed why="%s"' % (getattr(self, 'stop_why', '') or why))
+        self.stop_why = getattr(self, 'stop_why', '') or why
         self.start_again = False
         self.restart_run = False
         game.ABORT = True

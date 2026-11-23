@@ -23,6 +23,19 @@ FILES = {'Mari': {'3322c570efc137a477a1e2f04bb39fe7'},
          'Rin': {'25f70ebc3654f26af69047a7d941c859'},
          'Boss': {'741269bab3f96bb43876567e4cd50ac1', 'a8e0b2c3883e429349fa4130714abf8c'},
          'Sinister P.': set()}
+# read again by Roblox on every visit by themselves: watched, never blocked
+SEEN = {'Sinister P.': {'003e72810a4a336b7774ab0c84a5bc9c', '0e7807b206f9174cbf4bc70083a7e0e8',
+                        '1c3c3bf6081122c1971f45b2a73aa94e', '2e3b9f0eff43e0203d951dd5eab74961',
+                        '346a563ea663e021e1c1c0617bb5f561', '374edb9a6a6fee6a8e7435d19dea1551',
+                        '3749a6cc23d9dbe277be5f21e7c15824', '4f2499e606c2466afb8bb79cacd5ac43',
+                        '626719d430e188a612ac393f487b74bf', '778a33e40682e32fcdd411a2958ef011',
+                        '9a3488b631f68f3943f7aa4d26b311b3', 'a1cffcbfeca2acfb371418d165d5fce6',
+                        'a5d0deed171e45b8bf9d2c3797f4eadf', 'b987d24915c31493203d1bee08e4cf50',
+                        'ba4040af31004298ed240749431a22cb', 'bd6592975add4c3356d0e8b5420de950',
+                        'c5ade4486f0b73095ef9a8bce994fed5', 'cce366daa6d33188fc701b2b7d933d97',
+                        'd382b1a5072dfa7834c58007d5e4ad33', 'd7a07b78c33bbaacaedd36bcff62188d',
+                        'df9ebe60c054cd61b8dd9613894751dd', 'e34323777713d3cad46beddc9a16b993',
+                        'ed231d1ae0dd3e8b4192002143c47bb1', 'f6e1a921dd90e644b71a264cb5c2e443'}}
 
 
 LOCAL = os.environ.get('LOCALAPPDATA') or os.path.expanduser(r'~\AppData\Local')
@@ -227,7 +240,7 @@ class Tracker:
         path = self.cache()
         rows = touched(self.since, path) if path else []
         known = ADDRESSES if known is None else known
-        files = FILES if files is None else files
+        files = {n: FILES.get(n, set()) | SEEN.get(n, set()) for n in NAMES} if files is None else files
         read = reads({k for ks in files.values() for k in ks}, path) if path else {}
         came = set()
         with self.lock:

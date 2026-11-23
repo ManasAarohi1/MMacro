@@ -21,7 +21,7 @@ import numpy as np
 import psutil
 from mousekey import MouseKey
 from PIL import Image, ImageGrab
-from pynput.keyboard import Controller as KeyboardController, Key
+from pynput.keyboard import Controller as KeyboardController, Key, KeyCode
 
 ABORT = False            # set by Stop
 
@@ -221,12 +221,33 @@ def newest_log(log_dir=LOG_DIR):
 STUB_QUIET_S = 10        # quiet this long = dead launch stub
 
 
+_joined = {}             # path -> True or bytes read
+
+
+def joined_log(path):
+    """Has this log joined a game?"""
+    seen = _joined.get(path, 0)
+    if seen is True:
+        return True
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, seen - 64))
+            data = f.read()
+            _joined[path] = any(k.encode() in data for k in JOINED) or f.tell()
+    except OSError:
+        return False
+    return _joined[path] is True
+
+
 def moved_on(latest, path, joined=False):
-    """Switch to `latest` if it was created later, or once an unjoined `path` has gone quiet."""
+    """Switch to a later-created `latest` (once joined, if `path` is), or once an unjoined `path` has gone quiet."""
     if latest is None or latest == path:
         return False
-    if path is None or not os.path.exists(path) or _stat(latest, "st_ctime") > _stat(path, "st_ctime"):
+    if path is None or not os.path.exists(path):
         return True
+    joined = joined or joined_log(path)
+    if _stat(latest, "st_ctime") > _stat(path, "st_ctime"):
+        return not joined or joined_log(latest)
     return not joined and time.time() - _stat(path, "st_mtime") > STUB_QUIET_S
 
 
@@ -480,7 +501,15 @@ def disarm():
         pass
 
 
+def by_key(key):
+    """A letter as its key, whatever keyboard layout is on (else Ctrl+V types a lone 'v')."""
+    if isinstance(key, str) and len(key) == 1 and key.isascii() and key.isalpha():
+        return KeyCode.from_vk(ord(key.upper()))
+    return key
+
+
 def tap(key, hold=None, gap=None):
+    key = by_key(key)
     wait_for_front()
     with INPUT_LOCK:
         kb.press(key)
@@ -1441,8 +1470,8 @@ def close_tab(hwnd):
             break
         page = title
         with kb.pressed(Key.ctrl):
-            kb.press('w')
-            kb.release('w')
+            kb.press(by_key('w'))
+            kb.release(by_key('w'))
         closed += 1
         time.sleep(0.4)
         if not ctypes.windll.user32.IsWindow(hwnd):     # last tab, window gone
