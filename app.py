@@ -1,3 +1,4 @@
+import calendar
 import ctypes
 import email.utils
 import faulthandler
@@ -101,7 +102,7 @@ SMALL_BUTTON = dict(bg=SUNK, fg=TEXT, activebackground=SUNK, activeforeground=AC
                     highlightthickness=1, highlightbackground=EDGE)
 
 TITLE = 'MMacro'
-VERSION = '1.2.1'
+VERSION = '1.2.2'
 RELEASE_PAGE = 'https://github.com/ManasAarohi1/MMacro/releases/latest'
 RELEASES = os.environ.get('MMACRO_UPDATE_URL') or 'https://api.github.com/repos/ManasAarohi1/MMacro/releases/latest'
 INVITE = 'https://discord.gg/oppression'
@@ -164,7 +165,7 @@ JOIN_NONE_S = 300                       # 'nothing equipped' right after a join 
 EQUIP_GAP_S = 90                        # auto roll swaps fast
 MERCHANT_STALE_S = 150                  # merchants stay ~3 min
 LATE_RESULT_S = 8                       # reel result can be this late
-DAILY_UTC_S = 22 * 3600 + 60             # daily reset, 22:01 GMT
+DAILY_UTC_S = 60                         # daily reset: midnight UK time, pressed a minute after
 DAILY_AGAIN_S = (5 * 60, 10 * 60, 60 * 60)
 CLOCK_URLS = ('https://www.google.com', 'https://www.cloudflare.com', 'https://github.com')
 DAILY_LATE_S = 90                       # no reset seen: claim anyway
@@ -364,11 +365,20 @@ def utc_now():
     return time.time() + _clock_off
 
 
+def uk_ahead_s(t):
+    """Seconds UK time is ahead of GMT at epoch t: 1 h from the last Sunday of March to the last of October."""
+    y = time.gmtime(t).tm_year
+    last_sunday = lambda m: (lambda d: d - (time.gmtime(d).tm_wday + 1) % 7 * 86400)(
+        calendar.timegm((y, m, 31, 1, 0, 0)))
+    return 3600 if last_sunday(3) <= t < last_sunday(10) else 0
+
+
 def next_daily(now=None):
-    """Next press in epoch seconds by internet time: 22:01 GMT, then DAILY_AGAIN_S after it."""
+    """Next press in epoch seconds by internet time: just after midnight UK time, then DAILY_AGAIN_S after it."""
     now = utc_now() if now is None else now
-    day = now // 86400 * 86400 + DAILY_UTC_S
-    return min(t for base in (day - 86400, day, day + 86400) for t in [base] + [base + a for a in DAILY_AGAIN_S]
+    day = now // 86400 * 86400
+    return min(t for d in (day - 86400, day, day + 86400, day + 2 * 86400)
+               for base in [d - uk_ahead_s(d) + DAILY_UTC_S] for t in [base] + [base + a for a in DAILY_AGAIN_S]
                if t > now)
 
 
@@ -890,7 +900,9 @@ class Calibrate(tk.Toplevel):
             game.glide(*at)
 
     def reset(self, name):
+        import points
         game.forget_point(name)
+        points.forget(game.BUILT_IN.get(name, name))       # and look for it again
         self._refresh()
 
     def _refresh(self):
@@ -1628,8 +1640,10 @@ class App:
         rule(box)
         self.fish_vip = self._toggle(box, 'VIP', 'Untick if you don\'t own VIP', 'fish_vip')
         rule(box)
-        self.fish_sell = self._field(box, 'Sell every', str(self.cfg.get('fish_sell', 0)),
-                                     'Fish caught before selling and 0 turns it off')
+        self.fish_sell, every = tk.StringVar(value=str(self.cfg.get('fish_sell', 0))), []
+        self._row(box, 'Sell every', 'Fish caught before selling and 0 turns it off (off with Full bag check)',
+                  lambda r: every.append(entry(r, self.fish_sell, width=6, justify='center', font=('Consolas', 12),
+                                               disabledbackground=PANEL, disabledforeground=DIM)) or every[0], ipady=6)
         rule(box)
         self.fish_sell_all = self._toggle(box, 'Sell all', 'Sells every fish in your bag', 'fish_sell_all')
         rule(box)
@@ -1643,6 +1657,9 @@ class App:
         lock = lambda *_: amount[0].configure(state='disabled' if self.fish_sell_all.get() else 'normal')
         self.fish_sell_all.trace_add('write', lock)
         lock()
+        lock_every = lambda *_: every[0].configure(state='disabled' if self.fish_full_check.get() else 'normal')
+        self.fish_full_check.trace_add('write', lock_every)
+        lock_every()
         tk.Frame(box, bg=PANEL, height=6).pack()
 
     def open_stats(self):
@@ -2166,8 +2183,8 @@ class App:
         """Buttons are already auto: say so, then ask."""
         import points as gui
         size = game.window_size()
-        name = gui.NAMES.get(size)
-        if name:
+        if size in gui.sizes():
+            name = gui.NAMES.get(size, 'a common size')
             text = ('Your Roblox window is %s (%dx%d). MMacro knows every button exactly at this size, so they '
                     'already work.' % ((name,) + size))
         else:
@@ -2711,7 +2728,10 @@ class App:
         self.daily_at = next_daily()
         halt = lambda: game.ABORT or self.need_rejoin is not None
         busy = lambda: halt() or self.merchant_due is not None or self.pop_due is not None   # these drop everything
-        self.fisher = fishing.Fisher(vip=bool(self.fish_vip.get()), sell_every=self.sell_every(),
+        catching = lambda: halt() or self.merchant_due is not None                        # only a merchant presses Exit
+        fishing_now = lambda: bool(self.fisher and self.fisher.at_spot and self.fisher.line_out)
+        self.fisher = fishing.Fisher(vip=bool(self.fish_vip.get()),
+                                     sell_every=0 if self.fish_full_check.get() else self.sell_every(),
                                      sell_amount=self.sell_amount(), sell_all=bool(self.fish_sell_all.get()),
                                      full_check=bool(self.fish_full_check.get()),
                                      say=lambda m: note('fishing', m),
@@ -2752,10 +2772,14 @@ class App:
             self.check_in_game()
             if self.need_rejoin:
                 continue
-            if time.monotonic() >= stray_due and not busy():
+            if time.monotonic() >= stray_due and not busy() and not fishing_now():
                 stray_due = time.monotonic() + STRAY_EVERY_S
                 self.close_strays()
-            if self.pop_due and not self.need_rejoin:
+            if self.pop_due and not self.need_rejoin and fishing_now():
+                if not self.fisher.pause:                       # land this fish first
+                    self.fisher.pause = True
+                    note('pop', 'wait_for_catch biome="%s"' % pretty(self.pop_due))
+            elif self.pop_due and not self.need_rejoin:
                 if self.fisher:
                     self.drop_fishing(halt, 'fishing_dropped for=pop biome="%s"' % pretty(self.pop_due))
                 self.shut_selector()
@@ -2790,7 +2814,7 @@ class App:
                 self.between_fish(busy, 'selector', 'Biome Selector due', self.selector_turn)
             if utc_now() >= self.daily_at and not busy():
                 self.between_fish(busy, 'daily', 'daily rewards reset', self.daily_reset_turn)
-            if game.after_align and time.monotonic() >= self.daily_by and not busy():
+            if game.after_align and time.monotonic() >= self.daily_by and not busy() and not fishing_now():
                 game.after_align = None
                 self.claim_daily()
             now = time.monotonic()
@@ -2812,11 +2836,11 @@ class App:
                 self.nap(eden.COOLDOWN_S, busy)
                 if self.fisher:
                     self.fisher.lost()
-            if self.fisher is not None and not busy():
+            if self.fisher is not None and not catching() and (not busy() or fishing_now()):
                 if self.fisher.pause and not self.fisher.line_out:
                     self.fisher.pause, self.fisher.recast = False, self.fisher.at_spot
                 try:
-                    self.fisher.step(busy, LOOK_EVERY_S * 4)
+                    self.fisher.step(busy if not fishing_now() else catching, LOOK_EVERY_S * 4)
                 except Exception as e:
                     note('fishing', 'ERROR fishing_step_failed type=%s msg="%s"' % (type(e).__name__, e))
                     self.fisher.lost()
@@ -3219,6 +3243,7 @@ class App:
         """Portable Crack back to Eden's spawn. True once used."""
         say = lambda m: note('eden', m)
         say('crack_use reason="%s"' % why)
+        shop.why = ''
         try:
             ok = shop.use_item(CRACK, halt, say) and self.nap(CRACK_S, halt)
         except Exception as e:
@@ -3227,7 +3252,7 @@ class App:
             ok = False
         self.in_dimension = bool(ok)
         if not ok and not halt():
-            self.tell('Portable Crack not used', 'Ensure you have a Portable Crack', EMBED_BAD, 'Eden')
+            self.tell('Portable Crack not used', shop.why or 'Ensure you have a Portable Crack', EMBED_BAD, 'Eden')
         return self.in_dimension
 
     def drop_fishing(self, halt, why):
@@ -3359,7 +3384,8 @@ class App:
                     shot = crafter.toast_png()
                     note('craft', 'crafted_notification item="%s"' % (name or 'unreadable'))
                     stage = self.craft_stage
-                    if name in ('Heavenly Potion', '') and stage == 'wait':     # its Auto is the only one on
+                    if (name in ('Heavenly Potion', '') and stage == 'wait'     # its Auto is the only one on
+                            or name == 'Heavenly Potion' and stage == 'cauldron'):  # Auto lit before a failed visit
                         self.crafted(shot)
                     else:
                         owed = owed or (name in ('Heavenly Potion', '') and stage == 'buy')
@@ -3563,6 +3589,9 @@ class App:
             self.close_guis()
         if not used and self.dropped():
             return
+        if used is None:                                # Inventory never seen: not a miss
+            self.rune_due = time.monotonic() + RUNE_RETRY_S
+            return
         self.rune_tries += 1
         if used:
             self.rune_due = None
@@ -3679,6 +3708,10 @@ class App:
         try:
             got = game.item_pass(say=say, terms=due)
             done = time.monotonic()                     # cooldown starts at Use
+            if got is None:                             # Inventory never seen (cutscene): nothing was missing
+                for t in due:
+                    self.item_due[t] = done + ITEM_RETRY_S
+                return True
             cut = self.dropped()
             tried = [t for t in due if t in got or not cut]
             for t in tried:

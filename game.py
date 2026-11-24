@@ -931,13 +931,6 @@ def window_part(box, w, h):
     return int(round(box[0] * w)), y(box[1]), int(round(box[2] * w)), y(box[3])
 
 
-def window_box(box):
-    """Same, in screen pixels."""
-    l, t, r, b = client_box((0.0, 0.0, 1.0, 1.0))
-    x0, y0, x1, y1 = window_part(box, r - l, b - t)
-    return l + x0, t + y0, l + x1, t + y1
-
-
 WINDOW_TOP = 0.2556      # top edge on a 16:9 client
 
 
@@ -1063,10 +1056,13 @@ def close_inventory():
     _side_open = None
     if take_foreground() is None or not inventory_open():
         return False
-    b = window_box(INVENTORY_X)
+    import points
+    at = points.centre('inventoryInvClose')       # Aura Storage's X is under it too
+    if at is None:
+        return False
     print('inventory_close')
     for _ in range(3):
-        click((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
+        click(*at)
         time.sleep(0.5)
         if not inventory_open():
             return True
@@ -1779,12 +1775,12 @@ def paste_term(term, clear=True):
             tap('v', hold=0.01, gap=0.01)
         finally:
             up('ctrl')
-        time.sleep(PASTE_READ_S)                # Roblox reads it with the keys
+        held(PASTE_READ_S)                      # a lagging game takes Ctrl+V late, then pastes whatever is there
     finally:
         _clip_set(saved)
 
 
-PASTE_READ_S = 0.1
+PASTE_READ_S = 0.5
 
 
 def trim_memory():
@@ -1865,15 +1861,16 @@ def shut_daily():
 
 
 def item_pass(say=print, terms=(BR, SC)):
-    """Use one of each item in `terms` in one Inventory visit. Returns what was used."""
+    """Use one of each item in `terms` in one Inventory visit; None if the Inventory couldn't be seen."""
     if stopped():
         return []
     if not steady_front():
         say('WARN item_pass_skipped reason="Roblox not staying in front" used=[]')
-        return []
+        return None
     paced(SETTLE_S)
-    used = []
+    used, unseen = [], True
     if open_by_click('inventory', stopped) and not stopped() and press_point('items', settle=0.3):
+        unseen = False
         for term in terms:
             if stopped():
                 break
@@ -1882,7 +1879,11 @@ def item_pass(say=print, terms=(BR, SC)):
                 say('item_used term="%s" slot=%d' % (term, slot + 1))
                 used.append(term)
             elif not stopped():
+                unseen = unseen or not inventory_shown()
                 say('WARN item_not_used term="%s"' % term)
+    if unseen and not used and not stopped():
+        say('WARN item_pass_unseen reason="Inventory not on screen"')
+        used = None
     if INTERRUPT and INTERRUPT():
         return used                             # left open for merchant or pop
     if not stopped() and (window_seen() or not sees_windows()):
@@ -1924,6 +1925,12 @@ def _rects(hwnd):
 FIT_SIZES = ((1920, 1080), (1920, 1009), (1366, 768), (1366, 697))   # odd sizes: first that fits
 
 
+def fit_size(known, room_w, room_h, extra_w, extra_h):
+    """Client size for an odd-sized window: the first FIT_SIZES that fits, else the biggest known one, else None."""
+    rest = sorted((s for s in known if s not in FIT_SIZES), key=lambda s: -s[0] * s[1])
+    return next(((w, h) for w, h in list(FIT_SIZES) + rest if w + extra_w <= room_w and h + extra_h <= room_h), None)
+
+
 def fit_window(say=print):
     """Resize an odd-sized Roblox window to the biggest known size that fits. True if at a known size."""
     w = find_roblox_window()
@@ -1952,20 +1959,20 @@ def _fit(hwnd, say):
     u32.GetMonitorInfoW(u32.MonitorFromWindow(wintypes.HWND(hwnd), 2), ctypes.byref(info))
     work = info.rcWork
     room_w, room_h = work.right - work.left, work.bottom - work.top
-    for tw, th in FIT_SIZES:
-        ow, oh = tw + ww - cw, th + wh - ch
-        if ow > room_w or oh > room_h:
-            continue
-        u32.SetWindowPos(wintypes.HWND(hwnd), None, work.left + (room_w - ow) // 2, work.top + (room_h - oh) // 2,
-                         ow, oh, 0x0004 | 0x0010 | 0x4000)      # no z-order, no activate, async
-        for _ in range(20):
-            time.sleep(0.1)
-            if _rects(hwnd)[0] == (tw, th):
-                say('window_resized from=%dx%d to=%dx%d scale_pct=%d' % (cw, ch, tw, th, round(s * 100)))
-                return True
-        say('ERROR window_resize_failed from=%dx%d to=%dx%d wait_s=2' % (cw, ch, tw, th))
+    to = fit_size(known, room_w, room_h, ww - cw, wh - ch)
+    if to is None:
+        say('WARN window_no_fit room=%dx%d size=%dx%d scale_pct=%d fallback=scaled' % (room_w, room_h, cw, ch, round(s * 100)))
         return False
-    say('WARN window_no_fit room=%dx%d size=%dx%d scale_pct=%d fallback=scaled' % (room_w, room_h, cw, ch, round(s * 100)))
+    tw, th = to
+    ow, oh = tw + ww - cw, th + wh - ch
+    u32.SetWindowPos(wintypes.HWND(hwnd), None, work.left + (room_w - ow) // 2, work.top + (room_h - oh) // 2,
+                     ow, oh, 0x0004 | 0x0010 | 0x4000)      # no z-order, no activate, async
+    for _ in range(20):
+        time.sleep(0.1)
+        if _rects(hwnd)[0] == (tw, th):
+            say('window_resized from=%dx%d to=%dx%d scale_pct=%d' % (cw, ch, tw, th, round(s * 100)))
+            return True
+    say('ERROR window_resize_failed from=%dx%d to=%dx%d wait_s=2' % (cw, ch, tw, th))
     return False
 
 

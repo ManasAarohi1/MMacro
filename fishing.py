@@ -54,20 +54,20 @@ SLOW_STEP = 0.15         # extra wait when Sell Alls get dropped
 SLOW_MAX = 0.6
 SELL_WAIT_MIN, SELL_WAIT_MAX = 1.0, 6.0     # by how slow recent ones were
 SELL_MISSES = 3          # no change = empty bag
-# Buy side spots, as fractions of the shop
-SHOP = 0.55
-BUY_TAB = (0.476, 0.112)
-BUY_GRID = (0.305, 0.148, 0.995, 0.99)
-PRODUCT_NAME = (0.012, 0.634, 0.288, 0.725)
-PURCHASE = (0.15, 0.934)
-HEADER = (0.26, 0.22, 0.74, 0.285)              # "Confirm Purchase"
-AMOUNT_BOX = (0.649, 0.44)
-AMOUNT_TEXT = (0.515, 0.502, 0.782, 0.56)       # "250 / 1,000" or "[ Sold Out ]"
-CONFIRM = (0.649, 0.622)
-PRICE = (0.529, 0.582, 0.769, 0.661)
-POPUP_X = (0.781, 0.254)
-FISH_POINTS = (0.77, 0.01, 0.925, 0.07)
-SLOT = (0.163, 0.371)                           # one Buy grid item
+# shop buttons and read areas (points.py boxes)
+BUY_TAB = 'fishingShopBuyTab'
+BUY_GRID = 'fishingShopBuyPageFrame'
+PRODUCT_NAME = 'fishingShopBuyProductName'      # the same spot on the Sell page
+PURCHASE = 'fishingShopBuyPurchaseButton'
+HEADER = 'fishingShopBuyConfirmHeader'          # "Confirm Purchase"
+SELL_YES = 'fishingShopSellConfirmSellButton'   # Sell Confirm's "Sell" button
+AMOUNT_BOX = 'fishingShopBuyConfirmAmountBox'
+AMOUNT_TEXT = 'fishingShopBuyConfirmAmountLabel'   # "250 / 1,000" or "[ Sold Out ]"
+CONFIRM = 'fishingShopBuyConfirmButton'
+PRICE = CONFIRM                                 # the price is written on Confirm
+POPUP_X = 'fishingShopBuyConfirmCloseButton'
+FISH_POINTS = 'fishingShopCurrencyText'
+SLOT = 'fishingShopBuyItem[1,1]'                # one Buy grid item
 BUY_WAIT_S = 5.0
 
 
@@ -586,12 +586,24 @@ def slower(say):
         say('WARN sell_slowed extra_s=%.2f' % slow)
 
 
-def sell_all(halt):
+def answer(halt, say):
+    """Press Sell again while the Sell Confirm window is still up. False only on Stop or a failed click."""
+    for _ in range(3):
+        if 'sell' not in _text(SELL_YES):
+            break
+        say('WARN sell_confirm_again')
+        slower(say)
+        if not points.click('fishingShopSellConfirmSellButton', 0.1 + slow) or not nap(SELL_CLOSE_S + slow, halt):
+            return False
+    return True
+
+
+def sell_all(halt, say=print):
     for name, settle in (('fishingShopSellTab', 0.1), ('fishingShopSellItem[1,1]', 0.1),
                          ('fishingShopSellAllButton', 0.3 + slow), ('fishingShopSellConfirmSellButton', 0.1 + slow)):
         if halt() or not points.click(name, settle):
             return False
-    return nap(SELL_CLOSE_S + slow, halt)
+    return nap(SELL_CLOSE_S + slow, halt) and answer(halt, say)
 
 
 def no_fish(halt):
@@ -624,7 +636,7 @@ def sell(halt, times=1, say=print, every=True):
         guess = max(1, int(count / per * SELL_AHEAD)) if per else 2
         batch = min(SELL_MAX - done, guess, batch * 2)      # a 1-fish first kind can't guess 200 left
         for _ in range(batch):
-            if not sell_all(halt):
+            if not sell_all(halt, say):
                 return False
         done += batch
         now, reads = read_count(), reads + 1
@@ -643,7 +655,7 @@ def sell(halt, times=1, say=print, every=True):
         if unchanged(_empty, first_fish()):                 # came with fish: not empty
             _empty = None
     while start is None and done < (SELL_MAX if every else max(1, times)):
-        if not sell_all(halt):
+        if not sell_all(halt, say):
             return False
         done += 1
         limit = min(SELL_WAIT_MAX, max(SELL_WAIT_MIN, 2 * slowest))
@@ -674,24 +686,29 @@ def sell(halt, times=1, say=print, every=True):
             break
     if start is not None:
         say('sell_count before=%d after=%d sell_alls=%d reads=%d' % (start, count, done, reads))
-    closed = points.click('fishingShopCloseButton', 0.2)
-    if nap(0.4, halt):
-        points.leave_dialogue(skip=True)                     # dialogue outlives the shop
-    return done if closed else False
+    answer(halt, say)
+    for _ in range(3):                                      # a lost Close leaves the shop over Fish
+        closed = points.click('fishingShopCloseButton', 0.2)
+        if not closed or not nap(0.4, halt):
+            return done if closed else False
+        if _points() is None:
+            break
+        say('WARN shop_close_again')
+    points.leave_dialogue(skip=True)                         # dialogue outlives the shop
+    return done
 
 
-def _tap(spot, settle=0.3):
-    l, t = game.client_box(tuple(0.5 + SHOP * (v - 0.5) for v in spot * 2))[:2]
-    if not game.click(l, t, park=False):
-        return False
-    game.paced(settle)
-    return True
+def _tap(name, settle=0.3):
+    return points.click(name, settle)
 
 
 def _lines(area):
     """OCR of part of the shop as (squashed text, x, y) on screen."""
-    l, t, r, b = game.client_box(tuple(0.5 + SHOP * (v - 0.5) for v in area))
-    img = game.grab((l, t, r, b))
+    box = points.box(area)
+    if box is None:
+        return []
+    l, t, r, b = box
+    img = game.grab(box)
     try:
         result, _ = merchant.reader()(np.ascontiguousarray(img[..., ::-1]), use_cls=False)
     except Exception:
@@ -715,6 +732,19 @@ def _points(area=FISH_POINTS):
         return float(m.group(1).replace(',', '')) * {'': 1, 'k': 1e3, 'm': 1e6, 'b': 1e9}[m.group(2)]
     except (AttributeError, ValueError):
         return None
+
+
+def _steady_points(halt):
+    """Fish points read the same twice in a row (a digit is sometimes lost on one read), or None."""
+    last = None
+    for _ in range(4):
+        p = _points()
+        if p is not None and p == last:
+            return p
+        last = p
+        if not nap(0.15, halt):
+            return None
+    return None
 
 
 def _until(seen, seconds, halt):
@@ -768,8 +798,8 @@ def buy(halt, item='Lucky Potion', amount=250, say=print):
         _shut(halt)
         return False
     _, x, y = hits[0]
-    w, h = (lambda b: (b[2] - b[0], b[3] - b[1]))(game.client_box((0.0, 0.0, SHOP, SHOP)))
-    if any('soldout' in q[0] and abs(q[1] - x) < SLOT[0] * w / 2 and -SLOT[1] * h / 2 < q[2] - y < SLOT[1] * h / 4
+    w, h = (lambda b: (b[2] - b[0], b[3] - b[1]) if b else (0, 0))(points.box(SLOT))
+    if any('soldout' in q[0] and abs(q[1] - x) < w / 2 and -h / 2 < q[2] - y < h / 4
            for q in grid):
         say('buy_sold_out item="%s" at=grid' % item)
         return 0 if _shut(halt) else False
@@ -798,7 +828,7 @@ def buy(halt, item='Lucky Potion', amount=250, say=print):
         if halt() or not _tap(AMOUNT_BOX, 0.2):
             return False
         game.type_term(str(int(amount)))
-        _tap((0.5, 0.25), 0.3)                              # click off the box so it takes the amount
+        _tap(HEADER, 0.3)                                   # click off the box so it takes the amount
         m = re.match(r'(\d[\d,]*)/(\d[\d,]*)?', _text(AMOUNT_TEXT))       # "250 / 1,000": typed / most
         n, most = [int(g.replace(',', '')) if g else None for g in m.groups()] if m else (0, None)
         if most is not None and n > most:                   # "2501/1,000": the last digit
@@ -815,7 +845,7 @@ def buy(halt, item='Lucky Potion', amount=250, say=print):
         return False
     if n != amount:
         say('WARN buy_amount_capped allowed=%d want=%d' % (n, amount))
-    before, cost = _points(), _points(PRICE)
+    before, cost = _steady_points(halt), _points(PRICE)
     if cost is None or cost % n:
         cost = None
     need = cost or n                                        # every item costs 1+ points each
@@ -832,7 +862,11 @@ def buy(halt, item='Lucky Potion', amount=250, say=print):
     done = _until(paid, 1.5, stop) if before is not None else not _popup()     # points redraw a bit after
     if done is None or stop():
         return False
-    after = _points()
+    after = _steady_points(stop) if not done else _points()
+    if not done and before is not None and (after is None or after > before + need / 2):   # can't go up: misread
+        say('WARN buy_points_unsure item="%s" points_before=%d points_after=%s' % (
+            item, before, '?' if after is None else '%d' % after))
+        done = True
     if not done:                                            # None: the points didn't go down, not bought
         say('WARN buy_unconfirmed item="%s" points_before=%s points_after=%s' % (
             item, '?' if before is None else '%d' % before, '?' if after is None else '%d' % after))
@@ -1094,7 +1128,7 @@ class Fisher:
                 return self.full_bag()
             self.say('WARN line_not_out dry=%d/%d' % (self.dry, DRY_CASTS))
             return self.cast(halt)
-        if st is None and self.no_menu(halt):
+        if st is None and not self.line_out and self.no_menu(halt):     # line out: wait for the fish, no step or reset
             if getattr(self, 'nudged', False):          # once per walk: the second time, walk again
                 self.say('WARN fish_menu_missing then=walk_to_spot')
                 self.at_spot = self.line_out = False

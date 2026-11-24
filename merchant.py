@@ -182,8 +182,10 @@ def use_item(term, halt, say):
         return not halt() and failed('The Items tab could not be clicked', say)
     slot = game.search_item(term, say, halt, lambda s: nap(s, halt))
     if slot is None:
+        seen = game.inventory_shown()
         shut_inventory()
-        return not halt() and failed('No %s found in the Inventory (none left, or the search failed)' % what, say)
+        return not halt() and failed('No %s found in the Inventory (none left, or the search failed)' % what if seen
+                                     else 'The Inventory went off screen (a cutscene?)', say)
     if halt() or not game.press_use(slot, 0.4, halt):
         shut_inventory()
         return not halt() and failed('The %s was found but Use did not take' % what, say)

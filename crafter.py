@@ -410,7 +410,7 @@ def auto_start(halt, item='Heavenly Potion', say=print):
         return False
     step('auto')
     if not open_recipe(halt):
-        done('ERROR recipe_open_failed item="%s"' % item)
+        done('ERROR recipe_open_failed item="%s" middle="%s" buttons="%s"' % (item, _text('window')[:80], _text('bar')[:40]))
         return False
     step('open')
     if not everything(halt, say):
