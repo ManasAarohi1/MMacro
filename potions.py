@@ -12,11 +12,6 @@ GAP_S = 0.15
 MAX_USES = 300
 
 
-def term(name):
-    """Search term matching exactly `name` ('$' pins the end)."""
-    return name.lower() + '$'
-
-
 def looks_like(slot, name):
     """None if the name colour fits `name`, else the tier it looks like (or 'unreadable')."""
     if name not in TIERS:
@@ -38,7 +33,7 @@ def use(name, want, halt, say):
         return 0
     slot = None
     for _ in range(3):
-        slot = game.search_item(term(name), say, halt, game.paced)
+        slot = game.search_item(name.lower(), say, halt, game.paced)
         other = None if slot is None else looks_like(slot, name)
         if other is None:
             break

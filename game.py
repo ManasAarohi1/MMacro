@@ -1756,6 +1756,12 @@ def _clip_set(items):
         u32.CloseClipboard()
 
 
+def exact(name):
+    """Search text that finds only `name`: ^ and $ pin both ends, symbols typed as themselves ([ ] as any)."""
+    s = re.sub(r'[()%.+*?^$-]', lambda m: '%' + m.group(), name.lower())
+    return '^' + re.sub(r'[\[\]]', '.', s) + '$'
+
+
 def paste_term(term, clear=True):
     """Clear the focused box and paste `term`, restoring the clipboard; typed if the clipboard can't be had."""
     saved = _clip_save()
@@ -2371,7 +2377,7 @@ def search_item(term, say, halt, wait, tries=SEARCH_TRIES):
             return None
         if not inventory_shown():
             continue
-        type_term(term)
+        type_term(exact(term))
         wait(0.6)
         slot, colours = None, []
         end = time.monotonic() + RESULTS_S * LIMIT

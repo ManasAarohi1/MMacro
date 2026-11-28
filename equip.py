@@ -37,9 +37,15 @@ def resolve(text):
     return next(n for n in names if norm(n) == close[0]) if close else None
 
 
-def search_term(name):
-    """Search text: the name without symbols if that still matches, else its longest word."""
+def search_terms(name):
+    """Exact search (symbols the labels don't show left out), then the loose one for labels with extra letters."""
     name = name.replace('_', ' : ')
+    plain = re.sub(r'\s+', ' ', re.sub(r'[^\x20-\x7e]+', ' ', name)).strip() or name
+    return game.exact(plain), loose_term(name)
+
+
+def loose_term(name):
+    """The name without symbols if that still matches, else its longest word."""
     for keep in (r'[^\x20-\x7e]+', r'[^A-Za-z0-9 ]+'):
         plain = re.sub(r'\s+', ' ', re.sub(keep, ' ', name)).strip()
         if len(plain) >= 3 and plain.lower() in name.lower():
@@ -164,19 +170,22 @@ def nap(seconds, halt):
 
 def find(aura, halt, say, skip=()):
     """Click searched cells (minus `skip`) until the panel names `aura`; the cell or None."""
-    if halt() or not points.click(REGULAR, 0.2) or not points.click('auraStorageAuraSearchContent', 0.15):
+    if halt() or not points.click(REGULAR, 0.2):
         return None
-    game.type_term(search_term(aura))
-    if not nap(0.5, halt):
-        return None
-    for cell in CELLS:                          # copies and variants share a name
-        if cell in skip:
-            continue
-        if halt() or not points.click(cell, 0.2):
+    for term in dict.fromkeys(search_terms(aura)):
+        if not points.click('auraStorageAuraSearchContent', 0.15):
             return None
-        now = shown()
-        if now is not None and norm(now) == norm(aura):
-            return cell
+        game.type_term(term)
+        if not nap(0.5, halt):
+            return None
+        for cell in CELLS:                      # copies and variants share a name
+            if cell in skip:
+                continue
+            if halt() or not points.click(cell, 0.2):
+                return None
+            now = shown()
+            if now is not None and norm(now) == norm(aura):
+                return cell
     return None
 
 

@@ -246,11 +246,6 @@ def _godly_left(name):
     return 'godlypotion' in text and (god in text or _ours(layout()['left'], name))
 
 
-def _term(name):
-    """The search for exactly `name`: the box takes ( ) - . and the like as wildcards unless they follow a %."""
-    return re.sub(r'([^a-z0-9 ])', r'%\1', name.lower()) + '$'
-
-
 def find_recipe(name, halt, say=print):
     """Search `name`, click it in the list, and wait for it to show on the left. True once picked."""
     godly, shown = name in GODLY, base(name)
@@ -261,7 +256,7 @@ def find_recipe(name, halt, say=print):
     for go in range(TRIES):
         if halt() or not _click(layout()['search'], twice=True):
             return False
-        game.type_term(_term(shown)[:-1] if godly else _term(shown))     # brothers may carry the god's name
+        game.type_term(game.exact(shown)[:-1] if godly else game.exact(shown))     # brothers may carry the god's name
         game.tap(game.Key.enter)
         game.paced(0.4)
         row = _until(find, STEP_S, halt)

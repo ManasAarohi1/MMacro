@@ -15,12 +15,12 @@ import points
 TO_SHOP = [(0.0, 'down', 'w'), (0.7, 'down', 'a'), (5.2, 'up', 'w'), (5.2, 'up', 'a'), (5.3, 'down', 'w'),
            (6.4, 'up', 'w'), (6.7, 'down', 's'), (6.9, 'up', 's'), (7.1, 'down', ' '), (7.125, 'down', 'w'),
            (8.325, 'up', ' '), (8.525, 'up', 'w'), (8.825, 'down', 'e'), (9.125, 'up', 'e')]
-TO_SPOT = [(0.0, 'down', 'd'), (2.3, 'up', 'd'), (2.3, 'down', 'w'), (4.075, 'up', 'w')]
+TO_SPOT = [(0.0, 'down', 'a'), (3.0, 'up', 'a'), (3.0, 'down', 'w'), (5.3, 'up', 'w')]
 # same two walks without VIP
 TO_SHOP_FREE = [(0.0, 'down', 'w'), (0.875, 'down', 'a'), (6.725, 'up', 'w'), (6.725, 'up', 'a'), (6.825, 'down', 'w'),
                 (8.2, 'up', 'w'), (8.5, 'down', 's'), (8.75, 'up', 's'), (8.95, 'down', ' '), (8.975, 'down', 'w'),
                 (10.175, 'up', ' '), (10.725, 'up', 'w'), (11.025, 'down', 'e'), (11.325, 'up', 'e')]
-TO_SPOT_FREE = [(0.0, 'down', 'd'), (2.875, 'up', 'd'), (2.875, 'down', 'w'), (5.075, 'up', 'w')]
+TO_SPOT_FREE = [(0.0, 'down', 'a'), (3.75, 'up', 'a'), (3.75, 'down', 'w'), (6.625, 'up', 'w')]
 ZOOM_OUT_S = 1.5         # zoomed in, the bobber is lost
 ZOOM_TOPUP_S = 0.3
 BITE_WHITE = 200         # lit ~245 (~230 over RDP), dark under 40
