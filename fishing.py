@@ -49,15 +49,14 @@ SHOP_TRIPS = 3           # then fish without selling
 ALIGN_REJOIN = 3
 SELL_CLOSE_S = 1.0
 SELL_MAX = 100           # each Sell All clears one kind of fish
-SELL_AHEAD = 0.5         # sell half the guess, then recount
 SLOW_STEP = 0.15         # extra wait when Sell Alls get dropped
 SLOW_MAX = 0.6
-SELL_WAIT_MIN, SELL_WAIT_MAX = 1.0, 6.0     # by how slow recent ones were
-SELL_MISSES = 3          # no change = empty bag
+SALE_LOOKS = 15          # ~4 s for a sale to land
 # shop buttons and read areas (points.py boxes)
 BUY_TAB = 'fishingShopBuyTab'
 BUY_GRID = 'fishingShopBuyPageFrame'
 PRODUCT_NAME = 'fishingShopBuyProductName'      # the same spot on the Sell page
+SELLS_FOR = 'sellsFor'                          # "Sells for N": under the name, over Sell All
 PURCHASE = 'fishingShopBuyPurchaseButton'
 HEADER = 'fishingShopBuyConfirmHeader'          # "Confirm Purchase"
 SELL_YES = 'fishingShopSellConfirmSellButton'   # Sell Confirm's "Sell" button
@@ -531,49 +530,28 @@ def talked(halt):
     return False
 
 
-def first_fish():
-    img = points.grab('fishingShopSellItem[1,1]')
-    return None if img is None or img.size == 0 else img.astype(np.int16)
+def sells_for():
+    """N from "Sells for N" (0 with nothing picked), or None unread."""
+    t = _text(SELLS_FOR)
+    nums = re.findall(r'\d[\d,.]*', t)
+    return int(re.sub(r'\D', '', nums[-1])) if nums and game.fuzzy_has(t, 'sells for') else None
 
 
-def unchanged(a, b):
-    return a is not None and b is not None and a.shape == b.shape and float(np.abs(a - b).mean()) < 4
-
-
-def look(last, limit, halt):
-    """The first slot once it changes from `last`, or after `limit` s. Returns (image, seconds), or None on Stop."""
-    took = 0.0
-    while True:
-        now = first_fish()
-        if not unchanged(last, now) or took >= limit:
-            return now, took
-        if not nap(0.1, halt):
+def to_sell(halt, sold=False):
+    """The first slot clicked: fish there if it sells for more than 0 (unread: if the panel names one). An empty
+    bag shows 0 every try, as a click right after a sale can be ignored (or lost). None on Stop or a failed click."""
+    for _ in range(SALE_LOOKS if sold else 0):              # the sold fish stays picked till the sale is done
+        if not sells_for():
+            break
+        if not nap(0.2 + slow, halt):
             return None
-        took += 0.1
-
-
-_room = None                # bag size, last full count
-_ended = None               # the first slot when the last sale ended
-_empty = None               # ...same after two sales: an empty bag's look
-
-
-def read_count():
-    """Fish in the bag from 'Inventory [268 / 360]', or None; a lost '/' is split by the last bag size."""
-    global _room
-    img = points.grab('fishingShopSellTab')
-    if img is None or img.size == 0:
-        return None
-    try:
-        result, _ = merchant.reader()(np.ascontiguousarray(img[..., ::-1]), use_det=False, use_cls=False)
-    except Exception:
-        return None
-    nums = re.findall(r'\d+', result[0][0].split('[', 1)[-1]) if result else []
-    if len(nums) >= 2 and int(nums[0]) <= int(nums[1]):
-        _room = nums[1]
-        return int(nums[0])
-    if len(nums) == 1 and _room and nums[0].endswith(_room) and len(nums[0]) > len(_room):
-        return int(nums[0][:-len(_room)])
-    return None
+    for _ in range(TRIES):
+        if halt() or not points.click('fishingShopSellItem[1,1]', 0.3 + slow):
+            return None
+        n = sells_for()
+        if n or (n is None and re.search('[a-z0-9]', _text(PRODUCT_NAME))):     # a name read as "00" still counts
+            return True
+    return False
 
 
 slow = 0.0
@@ -598,94 +576,59 @@ def answer(halt, say):
     return True
 
 
-def sell_all(halt, say=print):
-    for name, settle in (('fishingShopSellTab', 0.1), ('fishingShopSellItem[1,1]', 0.1),
-                         ('fishingShopSellAllButton', 0.3 + slow), ('fishingShopSellConfirmSellButton', 0.1 + slow)):
-        if halt() or not points.click(name, settle):
+def confirm_up(halt):
+    """Sell Confirm's Sell button on screen, given a moment to draw."""
+    for _ in range(10):
+        if 'sell' in _text(SELL_YES):
+            return True
+        if not nap(0.2 + slow, halt):
             return False
+    return False
+
+
+def sell_all(halt, say=print):
+    """True once sold, None when Sell Confirm never shows (stop selling), False on Stop or a failed click."""
+    for _ in range(2):                                      # no Sell Confirm: Sell All once more
+        for name, settle in (('fishingShopSellTab', 0.1), ('fishingShopSellItem[1,1]', 0.1),
+                             ('fishingShopSellAllButton', 0.3 + slow)):
+            if halt() or not points.click(name, settle):
+                return False
+        if confirm_up(halt):
+            break
+        if halt():
+            return False
+    else:
+        say('WARN sell_confirm_missing tries=2 next=stop_selling')
+        return None
+    if halt() or not points.click(SELL_YES, 0.1 + slow):
+        return False
     return nap(SELL_CLOSE_S + slow, halt) and answer(halt, say)
 
 
-def no_fish(halt):
-    """Empty bag: the first slot clicked twice and the panel names nothing (a name read as "00" still counts)."""
-    for _ in range(2):                                      # a click right after a sale can be ignored
-        if halt() or not points.click('fishingShopSellItem[1,1]', 0.3) or re.search('[a-z0-9]', _text(PRODUCT_NAME)):
-            return False
-    return True
-
-
 def sell(halt, times=1, say=print, every=True):
-    """Sells the fish at Captain Flarg. Returns the Sell Alls done, or False."""
+    """Sells the fish at Captain Flarg, a Sell All per kind till the bag is empty (Sell all off: `times` at most).
+    Returns the Sell Alls done, or False."""
     if not points.click('dialogueChoice[1 of 1]', 0.4):      # middle choice is Sell Fish
         return False
     if points.leave_dialogue() and not nap(0.3, halt):     # dialogue covers the shop until Leave
         return False
+    if _until(lambda: _points() is not None, 3.0, halt) is None:     # still drawing: an empty-looking bag
+        return False
     if halt() or not points.click('fishingShopSellTab', 0.1):
         return False
-    start = None
-    if every:                                               # the shop may still be drawing: a miss here means
-        for _ in range(10):                                 # selling blind, Sell All after Sell All (~2 s)
-            start = read_count()
-            if start is not None or not nap(0.2, halt):
-                break
-        if start is None:
-            say('WARN sell_count_unread fallback=first_slot')
-    count = start
-    done, reads, same, last, batch, per = 0, 1, 0, None, 1, 0
-    while count is not None and count > 0 and done < SELL_MAX:
-        guess = max(1, int(count / per * SELL_AHEAD)) if per else 2
-        batch = min(SELL_MAX - done, guess, batch * 2)      # a 1-fish first kind can't guess 200 left
-        for _ in range(batch):
-            if not sell_all(halt, say):
-                return False
-        done += batch
-        now, reads = read_count(), reads + 1
-        if now is not None and (now >= count or (batch >= 4 and per and count - now < per * batch / 4)):
-            slower(say)                                     # sold under a quarter
-        if now is None or now >= count:
-            same += 1
-            if same >= 2:
-                break
-            continue
-        same, count, per = 0, now, (count - now) / batch
-    # no count: sell till the first slot stays; Sell all = no cap
-    global _ended, _empty
-    slowest = 0.0
-    if start is None:
-        if unchanged(_empty, first_fish()):                 # came with fish: not empty
-            _empty = None
-    while start is None and done < (SELL_MAX if every else max(1, times)):
-        if not sell_all(halt, say):
+    done = 0
+    while done < (SELL_MAX if every else max(1, times)):
+        left = to_sell(halt, done > 0)
+        if left is None:
+            return False
+        if not left:
+            break
+        sold = sell_all(halt, say)
+        if sold is None:
+            break
+        if not sold:
             return False
         done += 1
-        limit = min(SELL_WAIT_MAX, max(SELL_WAIT_MIN, 2 * slowest))
-        seen = look(last, limit, halt)
-        if seen is None:
-            return False
-        now, took = seen
-        if not unchanged(last, now):
-            slowest, same, last = max(slowest, took), 0, now
-            if unchanged(_empty, now):
-                break                                       # empty bag look
-            continue
-        same += 1                                           # a missed click or a slow game looks the same
-        empty = no_fish(halt)
-        if same >= SELL_MISSES or empty:
-            if every and not empty:                         # a late "Sell Confirm" may wait
-                if not points.click('fishingShopSellConfirmSellButton', 0.1):
-                    return False
-                seen = look(last, limit, halt)
-                if seen is None:
-                    return False
-                if not unchanged(last, seen[0]):
-                    same, last = 0, seen[0]
-                    continue
-            if unchanged(_ended, last):
-                _empty = last
-            _ended = last
-            break
-    if start is not None:
-        say('sell_count before=%d after=%d sell_alls=%d reads=%d' % (start, count, done, reads))
     answer(halt, say)
     for _ in range(3):                                      # a lost Close leaves the shop over Fish
         closed = points.click('fishingShopCloseButton', 0.2)
@@ -702,9 +645,16 @@ def _tap(name, settle=0.3):
     return points.click(name, settle)
 
 
+def _box(area):
+    if area != SELLS_FOR:
+        return points.box(area)
+    a, b = points.box(PRODUCT_NAME), points.box('fishingShopSellAllButton')
+    return None if a is None or b is None else (a[0], a[3], b[2], b[1])
+
+
 def _lines(area):
     """OCR of part of the shop as (squashed text, x, y) on screen."""
-    box = points.box(area)
+    box = _box(area)
     if box is None:
         return []
     l, t, r, b = box

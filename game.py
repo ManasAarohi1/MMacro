@@ -7,6 +7,7 @@ import json
 import math
 import os
 import random
+import difflib
 import re
 from urllib.parse import parse_qs, urlsplit
 import subprocess
@@ -1760,6 +1761,38 @@ def exact(name):
     """Search text that finds only `name`: ^ and $ pin both ends, symbols typed as themselves ([ ] as any)."""
     s = re.sub(r'[()%.+*?^$-]', lambda m: '%' + m.group(), name.lower())
     return '^' + re.sub(r'[\[\]]', '.', s) + '$'
+
+
+FOLD = str.maketrans('aq0l1|!5', 'oooiiiis')
+
+
+def fold(text):
+    """Screen-read text with the font's look-alikes made one: lower case, no spaces or marks, a/q/0 as o,
+    l/1/|/! as i, 5 as s, rn as m, vv as w."""
+    s = (text or '').lower().replace('rn', 'm').replace('vv', 'w').translate(FOLD)
+    return re.sub(r'[^a-z0-9]', '', s)
+
+
+def fuzzy_has(text, word, cutoff=0.8):
+    """Does `word` show in screen-read `text`: exactly once folded, or (5+ letters) as a close stretch of it."""
+    t, w = fold(text), fold(word)
+    if not w or w in t:
+        return bool(w)
+    if len(w) < 5:                                     # one letter off a short word is another word
+        return False
+    m = difflib.SequenceMatcher(b=w, autojunk=False)
+    for n in (len(w) - 1, len(w), len(w) + 1):
+        for i in range(max(1, len(t) - n + 1)):
+            m.set_seq1(t[i:i + n])
+            if m.ratio() >= cutoff:
+                return True
+    return False
+
+
+def fuzzy_same(a, b, cutoff=0.8):
+    """Two screen reads of the same words?"""
+    a, b = fold(a), fold(b)
+    return bool(a) and difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= cutoff
 
 
 def paste_term(term, clear=True):
